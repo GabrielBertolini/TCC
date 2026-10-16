@@ -1,0 +1,2634 @@
+---
+title: "Método de Agrupamento para Análise de Estabilidade e Reprodutibilidade em Radiômica"
+
+output:
+  html_document:
+    number_sections: FALSE
+    fig_caption: TRUE
+    theme: "cosmo"
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+author: "Gabriel Bertolini | Orientador: Prof. Dr. Cristiano Lima Hackmann, Departamento de Estatística, UFRGS"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", cache.lazy = FALSE)
+options(scipen = 999)
+
+# Números com vírgula decimal no texto
+fmt  <- function(x, d = 3) formatC(x, format = "f", digits = d, decimal.mark = ",")
+pct  <- function(x, d = 0) paste0(formatC(100 * x, format = "f", digits = d, decimal.mark = ","), " %")
+nome <- function(x) gsub("original_", "", x)
+```
+
+# 1. Apresentação
+
+## 1.1 Contexto: a radiômica e sua etapa estatística
+
+A radiômica pode ser definida como o processo que converte exames de imagem
+médica, tradicionalmente interpretados de forma visual, em dados quantitativos
+de alta dimensionalidade capazes de revelar padrões associados à biologia
+tumoral (Gillies, Kinahan e Hricak, 2016). Trata-se de abordagem não invasiva,
+que reaproveita imagens já obtidas na rotina clínica e pode ser repetida ao
+longo do tempo, permitindo monitoramento sem exames adicionais (Lambin et al.,
+2017).
+
+A chamada hipótese radiômica sustenta que a variação espacial de
+intensidade, textura e forma nos tumores reflete processos subjacentes como
+proliferação, necrose e angiogênese, de modo que descritores quantitativos
+extraídos das imagens carregariam informação relevante para diagnóstico,
+prognóstico e predição terapêutica (Lambin et al., 2012).
+
+O fluxo analítico radiômico é tipicamente descrito em etapas sucessivas:
+aquisição das imagens, padronização, segmentação da região de interesse,
+extração dos descritores quantitativos e, por fim, análise estatística
+(Rizzo et al., 2018; Scapicchio et al., 2021). Este trabalho tem foco na última
+etapa. Os descritores extraídos abrangem categorias complementares que descrevem
+diferentes dimensões da lesão: estatísticas de primeira ordem, que resumem a
+distribuição de intensidades; medidas de forma e tamanho, que capturam geometria
+e extensão; e famílias de textura, que quantificam padrões de heterogeneidade
+interna (van Timmeren et al., 2020).
+
+## 1.2 Problemas de Inconsistência e Instabilidade
+
+A etapa final do fluxo radiômico enfrenta um conjunto de desafios amplamente
+documentados. Três condições, simultaneamente presentes na maior parte dos
+estudos da área, favorecem a instabilidade dos resultados: **número reduzido de
+casos**, **grande volume de variáveis** e **alta correlação entre elas**
+(Gillies et al., 2016; Park et al., 2019). Sob essas condições, múltiplos
+subconjuntos de descritores podem apresentar desempenho preditivo equivalente,
+gerando modelos alternativos igualmente defensáveis mas pouco consistentes entre
+repetições (Khaire e Dhanalakshmi, 2019).
+
+A literatura documenta ainda um conjunto recorrente de problemas de prática:
+ausência de disponibilização de código e dados (Akinci D'Antonoli et al., 2024;
+Liu et al., 2019); normalização aplicada fora das dobras da validação cruzada,
+que introduz vazamento de informação e infla artificialmente tanto o desempenho
+quanto a estabilidade aparente (Castaldo et al., 2020; Demircioglu, 2021;
+Apicella et al., 2025); documentação insuficiente de elementos essenciais como
+semente aleatória, número de partições e grade de valores do parâmetro de ajuste
+(Zhao, 2021; Park et al., 2020); e, sobretudo, ausência de avaliação formal da
+estabilidade da seleção de variáveis (Perniciano et al., 2025).
+
+As consequências são conhecidas: variabilidade elevada entre estudos, seleções
+inconsistentes, baixa interpretabilidade e dificuldade de generalização, que em
+conjunto constituem barreiras à adoção clínica de modelos radiômicos
+(Park et al., 2020; Zwanenburg et al., 2020).
+
+Este trabalho atende diretamente ao último desses pontos e adota como premissa a recomendação, sustentada por Nogueira, Sechidis e Brown (2018) e Demircioglu (2021), de que a estabilidade deve ser avaliada de forma sistemática, sob múltiplas sementes e particionamentos, com todo o pré-processamento restrito ao conjunto de treino de cada dobra.
+
+## 1.3 Delineamento em dois eixos
+
+O objetivo do estudo é avaliar a
+confiabilidade da etapa estatística do fluxo radiômico em dois eixos distintos
+e complementares:
+
+| Eixo | O que varia | Objeto de avaliação | Supervisionado? | Método |
+|---|---|---|---|---|
+| **Reprodutibilidade** | o **método** (distância, ligação, corte) | a partição do espaço de variáveis | Não Supervisionado | Agrupamento Hierárquico |
+| **Estabilidade** | os **dados** (partições de validação cruzada) | o conjunto de variáveis selecionadas | Supervisionado | Random Forest |
+
+A distinção é deliberada e retoma as duas definições correntes na literatura.
+Segundo Nogueira, Sechidis e Brown (2018), **estabilidade** significa que
+pequenas mudanças nos dados não devem alterar o subconjunto de variáveis
+selecionado; **reprodutibilidade**, por sua vez, exige que um resultado possa ser
+obtido novamente a partir das informações fornecidas, o que envolve as decisões
+analíticas e não apenas os dados. A estabilidade mantém o procedimento fixo e
+verifica se ele responde a mesma coisa quando os dados mudam um pouco. A
+reprodutibilidade mantém os dados fixos e verifica se decisões analíticas
+defensáveis, mas raramente relatadas, levariam a descrições diferentes do
+mesmo conjunto de dados. O **agrupamento hierárquico** das variáveis é a ponte
+entre os dois: é o objeto cuja reprodutibilidade se avalia e, ao mesmo tempo, a
+unidade em que a estabilidade é remensurada.
+
+## 1.4 A hipótese central e sua fundamentação
+
+A alta correlação entre descritores radiômicos tem consequência específica sobre
+os métodos de seleção. Tolosi e Lengauer (2011) demonstraram que o ordenamento
+de variáveis por importância torna-se não confiável sob colinearidade elevada, e
+métodos baseados em penalização L1, como o LASSO, tendem a escolher
+arbitrariamente uma variável entre várias fortemente correlacionadas (Nogueira et al., 2018; Hastie, Tibshirani e Friedman, 2009).
+
+Um desenvolvimento posterior do mesmo grupo formalizou a consequência dessa
+observação para a mensuração: Sechidis et al. (2020) demonstraram que as
+métricas usuais de estabilidade subestimam sistematicamente a consistência
+verdadeira na presença de correlação forte entre preditores, produzindo um
+retrato excessivamente pessimista do procedimento de seleção. O argumento é
+direto: se duas variáveis carregam informações praticamente equivalentes, escolher ora uma ora
+outra não constitui inconsistência substantiva, ainda que seja contabilizado
+como tal por qualquer medida de sobreposição entre conjuntos.
+
+Daí decorre a hipótese central aqui investigada: mensurada na unidade do grupo
+de descritores mutuamente redundantes, e não na do descritor individual, a
+seleção deve revelar-se substancialmente mais consistente sem que nada no modelo
+ajustado tenha sido alterado.
+
+Cabe registrar que essa investigação responde diretamente à direção futura
+apontada por Peitz (2025), que ao estudar estabilidade e reprodutibilidade em
+radiômica de câncer de mama concluiu sugerindo avaliar a estabilidade em nível
+de grupos de variáveis, sob o argumento de que a instabilidade aparente em nível
+individual pode ocultar estabilidade maior quando observada em nível de grupos.
+O presente trabalho implementa essa avaliação, em outro sítio tumoral e com
+método de seleção distinto.
+
+Verificar a hipótese exige, porém, que o agrupamento utilizado como unidade de
+mensuração seja ele próprio confiável, o que motiva o eixo de reprodutibilidade
+descrito acima.
+
+## 1.5 O protocolo de contraste
+
+Uma terceira dimensão atravessa ambos os eixos: o protocolo de aquisição.
+Parte dos exames foi realizada com contraste endovenoso e parte sem. Como o
+contraste altera diretamente a atenuação dos tecidos, descritores de intensidade
+extraídos sob os dois protocolos não são, a rigor, comensuráveis. Variabilidade
+técnica dessa natureza é reconhecidamente uma das principais barreiras à
+generalização de modelos radiômicos entre instituições (Traverso et al., 2018;
+van Velden et al., 2016), o que exige tratamento explícito e não apenas menção
+entre as limitações. Esta é a principal fonte de variabilidade técnica do banco
+e é tratada antes de qualquer modelagem radiômica: os descritores alterados pelo
+contraste são identificados pelo delta de Cliff e removidos (Seções 6 e 7). O
+protocolo é também incorporado ao desenho amostral de todas as análises
+subsequentes.
+
+## 1.6 O desfecho como tarefa-referência
+
+A discriminação entre adenocarcinoma pulmonar e colorretal funciona como
+tarefa-referência. A seleção supervisionada exige um desfecho para operar:
+sem rótulo não há noção de importância e, portanto, não há conjunto selecionado
+cuja estabilidade se possa medir. Um desfecho com sinal detectável é condição
+metodológica necessária, pois, se a capacidade discriminativa fosse nula, qualquer
+instabilidade teria explicação trivial. Há também plausibilidade clínica
+indireta na diferenciação entre adenocarcinoma pulmonar primário e metástase
+pulmonar de origem colorretal, cenário em que a decisão frequentemente demanda
+confirmação histológica por meio de procedimento invasivo e altera a conduta
+terapêutica (Lee, Jeong e Kim, 2021).
+
+## 1.7 Um modelo de referência clínico
+
+Na prática clínica, lesões pulmonares são caracterizadas principalmente pelo
+**tamanho** e pela **forma**. O diâmetro e a morfologia da borda (lisa,
+lobulada ou espiculada) são critérios centrais na avaliação de nódulos
+pulmonares (Snoeckx et al., 2018) e compõem os modelos de risco mais usados na
+rotina, como os da Mayo Clinic e de Brock, ambos regressões logísticas que
+combinam o tamanho do nódulo com a presença de espiculação (Swensen et al.,
+1997; McWilliams et al., 2013). Na distinção entre adenocarcinoma pulmonar
+primário e metástase pulmonar de câncer colorretal, a forma tem papel de
+destaque: tumores primários tendem a apresentar bordas irregulares ou
+espiculadas, enquanto metástases tendem a ser arredondadas e de contorno liso
+(Lee, Jeong e Kim, 2021).
+
+Entre os descritores radiômicos, a **esfericidade** é a medida que melhor
+traduz essa avaliação de forma: ela compara a superfície da lesão com a de uma
+esfera de mesmo volume e diminui à medida que a borda se torna irregular,
+acompanhando o grau de espiculação (Limkin et al., 2019). Por construção, não
+depende do tamanho da lesão; o tamanho permanece representado na análise
+radiômica, que inclui descritores fortemente associados ao volume.
+
+Por isso, o estudo parte de um **modelo base**: uma regressão logística com a
+esfericidade como única variável, simples e facilmente interpretável pela
+clínica. Os modelos radiômicos são avaliados contra essa referência, o que
+permite responder não apenas se são estáveis e reprodutíveis, mas também se
+acrescentam informação ao que a avaliação da forma já oferece.
+
+## 1.8 Estratégia da análise
+
+| Etapa | Pergunta | Seção |
+|---|---|---|
+| **Modelo base** | Quanto a irregularidade da borda, medida pela esfericidade, discrimina os diagnósticos numa regressão logística simples? | 5 |
+| **Controle do contraste** | Quais descritores não são alterados pelo protocolo de contraste em nenhum dos diagnósticos? | 6 e 7 |
+| **Seleção** | Quais desses descritores o Random Forest escolhe com mais frequência? | 8 |
+| **Agrupamento e reprodutibilidade** | Os descritores formam grupos redundantes? Essa estrutura se reproduz com outros pacientes e outras decisões de método? | 9 a 11 |
+| **Estabilidade** | A seleção é mais consistente quando lida no nível de cluster, descontado o acaso? | 12 |
+| **Comparação** | Os modelos radiômicos superam o modelo base ou acrescentam informação a ele? | 13 |
+
+Os métodos estatísticos de cada etapa estão descritos na Seção 4.
+
+\
+
+# 2. Pacotes e parâmetros
+
+```{r pacotes}
+library(readr)        # leitura de CSV
+library(readxl)       # leitura de Excel
+library(dplyr)        # manipulação dos dados
+library(ggplot2)      # gráficos
+library(knitr)        # tabelas
+library(kableExtra)   # formatação de tabelas
+library(randomForest) # Random Forest
+library(pROC)         # AUC
+library(caret)        # partições estratificadas
+library(pheatmap)     # mapas de calor
+library(RColorBrewer) # paletas de cores
+library(cluster)      # silhueta
+```
+
+```{r config}
+CAMINHO <- "C:/Users/gabri/OneDrive/Documentos/TCC/bd_rad_clinico.csv"
+
+# Lapidação
+LIM_DESPREZIVEL <- 0.147   # |delta de Cliff| < 0,147: efeito desprezível (Romano et al., 2006)
+
+# Validação cruzada e Random Forest
+N_SEEDS   <- 10            # repetições da validação cruzada
+N_FOLDS   <- 5             # folds externos
+N_FOLDS_I <- 3             # folds internos (escolha do mtry)
+NTREE     <- 500           # árvores no ajuste final
+NTREE_TUN <- 300           # árvores na escolha do mtry
+
+# Seleção
+K_GRID <- c(3, 5, 7)       # tamanhos do conjunto selecionado
+TOP_K  <- 5                # k de referência
+
+# Agrupamento
+CORTE  <- 0.20             # corte do dendrograma: d = 1 - |rho|, isto é, |rho| >= 0,80
+B_BOOT <- 300              # reamostragens nas análises de reprodutibilidade
+
+# Estabilidade da seleção
+B_ACASO      <- 2000       # sorteios para a linha de base do acaso (Jaccard)
+B_ACASO_PHI  <- 200        # sorteios para a linha de base do acaso (Phi)
+B_PERM       <- 200        # permutações do diagnóstico
+N_SEEDS_PERM <- 5          # sementes por permutação
+
+SEMENTE <- 42
+set.seed(SEMENTE)
+```
+
+
+\
+
+# 3. Dados
+
+## 3.1 Importação
+
+Cada linha é um paciente; cada coluna `original_*` é um descritor radiômico
+calculado na imagem original, sem filtros.
+
+```{r leitura}
+ler_base <- function(caminho) {
+  if (grepl("\\.xlsx?$", caminho, ignore.case = TRUE)) {
+    d <- readxl::read_excel(caminho)
+    if (ncol(d) == 1) {  # exportação com o CSV inteiro em uma única coluna
+      d <- readr::read_csv(paste(c(names(d), d[[1]]), collapse = "\n"),
+                           show_col_types = FALSE)
+    }
+    d
+  } else {
+    readr::read_csv(caminho, show_col_types = FALSE)
+  }
+}
+
+bruto <- ler_base(CAMINHO)
+feat_todas <- names(bruto)[grepl("^original_", names(bruto))]
+
+cat("Dimensões da planilha:", nrow(bruto), "linhas x", ncol(bruto), "colunas\n")
+cat("Descritores radiômicos:", length(feat_todas), "\n")
+cat("Variáveis não radiômicas:",
+    paste(setdiff(names(bruto), feat_todas), collapse = ", "), "\n")
+```
+
+## 3.2 Limpeza e definição das variáveis
+
+Dois critérios de exclusão, ambos fixados antes de qualquer análise
+inferencial: pacientes sem extração radiômica completa e descritores constantes,
+que não contribuem para a matriz de correlação.
+
+```{r limpeza}
+falt <- apply(is.na(bruto[, feat_todas]), 1, any)
+if (any(falt)) {
+  id <- if ("id_table" %in% names(bruto)) bruto$id_table[falt] else which(falt)
+  cat("Excluídos por radiômica ausente:", paste(id, collapse = ", "), "\n")
+}
+dados <- bruto[!falt, ]
+
+const <- feat_todas[sapply(dados[, feat_todas], function(x) length(unique(x)) <= 1)]
+if (length(const) > 0) cat("Descritores constantes removidos:", paste(const, collapse = ", "), "\n")
+feat <- setdiff(feat_todas, const)
+
+# Desfecho: 1 = pulmão, 0 = colorretal. 
+dx <- iconv(dados$diagnostico, to = "ASCII//TRANSLIT")
+y  <- as.integer(grepl("pulm", dx, ignore.case = TRUE))
+
+# Protocolo: 1 = com contraste, 0 = sem
+ctr_txt <- iconv(dados$contraste, to = "ASCII//TRANSLIT")
+ct <- as.integer(grepl("^s", trimws(tolower(ctr_txt))))   # "sim" -> 1, "nao" -> 0
+
+X <- as.matrix(dados[, feat]); storage.mode(X) <- "double"
+n <- nrow(X); p <- ncol(X)
+
+stopifnot(sum(y) > 0, sum(y) < n, !any(is.na(X)), !any(is.na(ct)))
+cat("\nAmostra analítica: n =", n, "| p =", p, "| razão p/n =", round(p/n, 2), "\n")
+cat("Diagnóstico: pulmão", sum(y), "| colorretal:", sum(1 - y), "\n")
+cat("Protocolo: com contraste", sum(ct), "| sem contraste:", sum(1 - ct), "\n")
+```
+
+```{r descritiva}
+familia <- sapply(strsplit(feat, "_"), `[`, 2)
+
+tab_cruz <- table(Protocolo = ifelse(ct == 1, "Com contraste", "Sem contraste"),
+                  Diagnóstico = ifelse(y == 1, "Pulmão", "Colorretal"))
+kable(addmargins(tab_cruz, FUN = list(Total = sum), quiet = TRUE), format = "html",
+      caption = "Tabela 1. Protocolo de contraste por diagnóstico") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+\
+  
+# arrumar para as variaveis do banco somente
+
+## 3.3 Descrição das variáveis
+
+Os descritores foram extraídos com o PyRadiomics (van Griethuysen et al.,
+2017) na imagem original, sem filtros. Neste trabalho, família é a classe
+de descritores do PyRadiomics, identificada pelo prefixo do nome da variável.
+A Tabela 2 resume as famílias, e a Tabela 3 descreve cada descritor.
+
+```{r familias-tab, echo=FALSE}
+tab_familias <- data.frame(
+  Família = c("shape", "firstorder", "glcm", "glrlm", "glszm", "gldm", "ngtdm"),
+  Nome = c("Forma", "Primeira ordem", "Matriz de coocorrência de níveis de cinza",
+           "Matriz de comprimento de corrida", "Matriz de tamanho de zona",
+           "Matriz de dependência de nível de cinza", "Matriz de diferença de tom de vizinhança"),
+  Descritores = as.integer(table(factor(familia, c("shape", "firstorder", "glcm", "glrlm",
+                                                     "glszm", "gldm", "ngtdm")))),
+  Descrição = c(
+    "Tamanho e forma tridimensional da lesão, calculados apenas pela segmentação, sem usar intensidades.",
+    "Distribuição das intensidades dos voxels da lesão, sem considerar a posição de cada voxel.",
+    "Textura pela frequência com que pares de níveis de cinza ocorrem em voxels vizinhos.",
+    "Textura por sequências de voxels consecutivos com o mesmo nível de cinza (corridas) numa direção.",
+    "Textura por regiões de voxels conectados com o mesmo nível de cinza (zonas), em qualquer direção.",
+    "Textura pelo número de vizinhos com intensidade semelhante à de cada voxel (dependência).",
+    "Textura pela diferença entre cada voxel e a média de seus vizinhos."),
+  check.names = FALSE)
+
+kable(tab_familias, format = "html", row.names = FALSE, align = c("l", "l", "c", "l"),
+      caption = "Tabela 2. Famílias de descritores do PyRadiomics") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  column_spec(4, width = "50%")
+```
+
+<details><summary><b>Tabela 3. Descrição de cada descritor</b> (clique para abrir)</summary>
+
+```{r descritores-tab, echo=FALSE}
+desc_curta <- c(
+  # forma
+  shape_Elongation = "Grau de alongamento (inverso)",
+  shape_Flatness = "Grau de achatamento (inverso)",
+  shape_LeastAxisLength = "Menor eixo do elipsoide",
+  shape_MajorAxisLength = "Maior eixo do elipsoide",
+  shape_Maximum2DDiameterColumn = "Maior diâmetro no plano coronal",
+  shape_Maximum2DDiameterRow = "Maior diâmetro no plano sagital",
+  shape_Maximum2DDiameterSlice = "Maior diâmetro no plano axial",
+  shape_Maximum3DDiameter = "Maior diâmetro em 3D",
+  shape_MeshVolume = "Volume calculado pela malha",
+  shape_MinorAxisLength = "Eixo intermediário do elipsoide",
+  shape_Sphericity = "Proximidade a uma esfera",
+  shape_SurfaceArea = "Área da superfície da lesão",
+  shape_SurfaceVolumeRatio = "Razão entre superfície e volume",
+  shape_VoxelVolume = "Volume pela contagem de voxels",
+  # primeira ordem
+  firstorder_10Percentile = "Percentil 10 das intensidades",
+  firstorder_90Percentile = "Percentil 90 das intensidades",
+  firstorder_Energy = "Soma dos quadrados das intensidades",
+  firstorder_Entropy = "Aleatoriedade do histograma de intensidades",
+  firstorder_InterquartileRange = "Amplitude interquartil das intensidades",
+  firstorder_Kurtosis = "Peso das caudas (curtose)",
+  firstorder_Maximum = "Intensidade máxima",
+  firstorder_MeanAbsoluteDeviation = "Desvio absoluto médio",
+  firstorder_Mean = "Intensidade média",
+  firstorder_Median = "Intensidade mediana",
+  firstorder_Minimum = "Intensidade mínima",
+  firstorder_Range = "Amplitude das intensidades",
+  firstorder_RobustMeanAbsoluteDeviation = "Desvio absoluto médio robusto",
+  firstorder_RootMeanSquared = "Raiz da média quadrática",
+  firstorder_Skewness = "Assimetria das intensidades",
+  firstorder_TotalEnergy = "Energia multiplicada pelo volume do voxel",
+  firstorder_Uniformity = "Homogeneidade do histograma de intensidades",
+  firstorder_Variance = "Variância das intensidades",
+  # GLCM
+  glcm_Autocorrelation = "Finura ou grosseria da textura",
+  glcm_JointAverage = "Nível de cinza médio dos pares",
+  glcm_ClusterProminence = "Assimetria da matriz (4.º momento)",
+  glcm_ClusterShade = "Assimetria da matriz (3.º momento)",
+  glcm_ClusterTendency = "Agrupamento de níveis semelhantes",
+  glcm_Contrast = "Variação local de intensidade",
+  glcm_Correlation = "Dependência linear entre vizinhos",
+  glcm_DifferenceAverage = "Diferença média entre vizinhos",
+  glcm_DifferenceEntropy = "Aleatoriedade das diferenças entre vizinhos",
+  glcm_DifferenceVariance = "Variabilidade das diferenças entre vizinhos",
+  glcm_JointEnergy = "Homogeneidade dos pares de vizinhos",
+  glcm_JointEntropy = "Aleatoriedade dos pares de vizinhos",
+  glcm_Imc1 = "Correlação informacional entre vizinhos (1)",
+  glcm_Imc2 = "Correlação informacional entre vizinhos (2)",
+  glcm_Idm = "Homogeneidade local (momento inverso)",
+  glcm_Idmn = "Homogeneidade local normalizada (momento)",
+  glcm_Id = "Homogeneidade local (diferença inversa)",
+  glcm_Idn = "Homogeneidade local normalizada (diferença)",
+  glcm_InverseVariance = "Predomínio de pequenas diferenças",
+  glcm_MaximumProbability = "Par de níveis mais frequente",
+  glcm_SumEntropy = "Aleatoriedade das somas dos pares",
+  glcm_SumSquares = "Variância dos níveis dos pares",
+  # GLRLM
+  glrlm_GrayLevelNonUniformity = "Variabilidade dos níveis (não normalizada)",
+  glrlm_GrayLevelNonUniformityNormalized = "Variabilidade dos níveis (normalizada)",
+  glrlm_GrayLevelVariance = "Variância dos níveis das corridas",
+  glrlm_HighGrayLevelRunEmphasis = "Corridas de nível alto",
+  glrlm_LongRunEmphasis = "Corridas longas (textura grosseira)",
+  glrlm_LongRunHighGrayLevelEmphasis = "Corridas longas de nível alto",
+  glrlm_LongRunLowGrayLevelEmphasis = "Corridas longas de nível baixo",
+  glrlm_LowGrayLevelRunEmphasis = "Corridas de nível baixo",
+  glrlm_RunEntropy = "Aleatoriedade das corridas",
+  glrlm_RunLengthNonUniformity = "Variabilidade dos comprimentos (não normalizada)",
+  glrlm_RunLengthNonUniformityNormalized = "Variabilidade dos comprimentos (normalizada)",
+  glrlm_RunPercentage = "Proporção de corridas por voxel",
+  glrlm_RunVariance = "Variância dos comprimentos de corrida",
+  glrlm_ShortRunEmphasis = "Corridas curtas (textura fina)",
+  glrlm_ShortRunHighGrayLevelEmphasis = "Corridas curtas de nível alto",
+  glrlm_ShortRunLowGrayLevelEmphasis = "Corridas curtas de nível baixo",
+  # GLSZM
+  glszm_GrayLevelNonUniformity = "Variabilidade dos níveis (não normalizada)",
+  glszm_GrayLevelNonUniformityNormalized = "Variabilidade dos níveis (normalizada)",
+  glszm_GrayLevelVariance = "Variância dos níveis das zonas",
+  glszm_HighGrayLevelZoneEmphasis = "Zonas de nível alto",
+  glszm_LargeAreaEmphasis = "Zonas grandes (textura grosseira)",
+  glszm_LargeAreaHighGrayLevelEmphasis = "Zonas grandes de nível alto",
+  glszm_LargeAreaLowGrayLevelEmphasis = "Zonas grandes de nível baixo",
+  glszm_LowGrayLevelZoneEmphasis = "Zonas de nível baixo",
+  glszm_SizeZoneNonUniformity = "Variabilidade dos tamanhos (não normalizada)",
+  glszm_SizeZoneNonUniformityNormalized = "Variabilidade dos tamanhos (normalizada)",
+  glszm_SmallAreaEmphasis = "Zonas pequenas (textura fina)",
+  glszm_SmallAreaHighGrayLevelEmphasis = "Zonas pequenas de nível alto",
+  glszm_SmallAreaLowGrayLevelEmphasis = "Zonas pequenas de nível baixo",
+  glszm_ZoneEntropy = "Aleatoriedade das zonas",
+  glszm_ZonePercentage = "Proporção de zonas por voxel",
+  glszm_ZoneVariance = "Variância dos tamanhos de zona",
+  # GLDM
+  gldm_DependenceEntropy = "Aleatoriedade das dependências",
+  gldm_DependenceNonUniformity = "Variabilidade das dependências (não normalizada)",
+  gldm_DependenceNonUniformityNormalized = "Variabilidade das dependências (normalizada)",
+  gldm_DependenceVariance = "Variância das dependências",
+  gldm_GrayLevelNonUniformity = "Variabilidade dos níveis (não normalizada)",
+  gldm_GrayLevelVariance = "Variância dos níveis",
+  gldm_HighGrayLevelEmphasis = "Concentração de níveis altos",
+  gldm_LargeDependenceEmphasis = "Dependências grandes (mais homogêneo)",
+  gldm_LargeDependenceHighGrayLevelEmphasis = "Dependências grandes de nível alto",
+  gldm_LargeDependenceLowGrayLevelEmphasis = "Dependências grandes de nível baixo",
+  gldm_LowGrayLevelEmphasis = "Concentração de níveis baixos",
+  gldm_SmallDependenceEmphasis = "Dependências pequenas (mais heterogêneo)",
+  gldm_SmallDependenceHighGrayLevelEmphasis = "Dependências pequenas de nível alto",
+  gldm_SmallDependenceLowGrayLevelEmphasis = "Dependências pequenas de nível baixo",
+  # NGTDM
+  ngtdm_Busyness = "Mudanças rápidas entre vizinhos",
+  ngtdm_Coarseness = "Grosseria da textura",
+  ngtdm_Complexity = "Complexidade da textura",
+  ngtdm_Contrast = "Contraste espacial de intensidade",
+  ngtdm_Strength = "Nitidez dos padrões de textura")
+
+nomes_curtos <- nome(feat)
+faltando <- setdiff(nomes_curtos, names(desc_curta))
+if (length(faltando)) warning("Descritores sem descrição: ", paste(faltando, collapse = ", "))
+
+tab_desc <- data.frame(
+  Família = familia,
+  Descritor = sub("^[^_]+_", "", nomes_curtos),
+  Descrição = unname(desc_curta[nomes_curtos]),
+  check.names = FALSE)
+
+kable(tab_desc, format = "html", row.names = FALSE, align = c("l", "l", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 13) %>%
+  collapse_rows(columns = 1, valign = "top") %>%
+  scroll_box(height = "520px")
+```
+
+</details>
+
+> Nos descritores de textura, "nível alto" e "nível baixo" referem-se aos
+> níveis de cinza após a discretização das intensidades. Descritores
+> marcados como "não normalizada" dependem do número total de corridas, zonas
+> ou voxels e, portanto, tendem a crescer com o tamanho da lesão.
+
+\
+
+# 4. Materiais e métodos
+
+Esta seção reúne as definições, equações e testes usados nas análises. A
+implementação de cada procedimento aparece no código da seção em que ele é
+aplicado.
+
+## 4.1 Notação
+
+São $n$ pacientes, indexados por $i$, com desfecho $y_i = 1$ para
+adenocarcinoma pulmonar e $y_i = 0$ para colorretal, e $p$ descritores
+radiômicos. O protocolo de aquisição é indicado por $c_i = 1$ (com contraste) ou
+$c_i = 0$ (sem contraste).
+
+## 4.2 Regressão logística do modelo base
+
+O modelo base relaciona a probabilidade de a lesão ser pulmonar à esfericidade
+$e_i$ (Seção 5):
+
+$$\log\left(\frac{\pi_i}{1 - \pi_i}\right) = \beta_0 + \beta_1 e_i, \qquad \pi_i = P(y_i = 1 \mid e_i).$$
+
+Os coeficientes são estimados por máxima verossimilhança. Como a esfericidade
+varia entre 0 e 1, o efeito é expresso como a razão de chances para uma
+**redução de 0,1** na esfericidade,
+
+$$\text{RC}_{0,1} = \exp(-0{,}1\,\beta_1),$$
+
+com intervalo de confiança de 95 % obtido pela transformação do intervalo de
+Wald de $\beta_1$. Para verificar a influência do protocolo, ajusta-se também o
+modelo com $c_i$ e com a interação $e_i \times c_i$.
+
+## 4.3 Validação cruzada repetida e AUC
+
+Todos os modelos são avaliados por validação cruzada com $K = 5$ folds,
+repetida $R = 10$ vezes com sementes diferentes. Os folds são estratificados
+pela combinação de diagnóstico e protocolo, de modo que cada fold preserve a
+proporção dos quatro grupos. Em cada repetição, cada paciente recebe uma
+probabilidade estimada por um modelo ajustado sem ele (predição
+*out-of-fold*). Todo o pré-processamento, como a padronização das variáveis, é
+estimado apenas no treino de cada fold.
+
+A capacidade de discriminação é medida pela área sob a curva ROC (AUC), que
+equivale à probabilidade de um paciente pulmonar receber escore maior que um
+colorretal:
+
+$$\text{AUC} = \frac{1}{n_1 n_0} \sum_{i:\,y_i = 1}\ \sum_{j:\,y_j = 0} \left[ I(s_i > s_j) + \tfrac{1}{2} I(s_i = s_j) \right],$$
+
+em que $s$ é a probabilidade estimada, e $n_1$ e $n_0$ são os números de
+pacientes pulmonares e colorretais. A AUC é calculada em cada repetição, e as
+$R$ repetições são resumidas pela média e pelo desvio padrão.
+
+## 4.4 Regra de classificação
+
+Para uso clínico, o escore é convertido numa regra por meio de um ponto de corte
+$t$, escolhido pelo índice de Youden:
+
+$$J(t) = \text{Sensibilidade}(t) + \text{Especificidade}(t) - 1.$$
+
+A partir da tabela de classificação, com verdadeiros positivos (VP), falsos
+negativos (FN), verdadeiros negativos (VN) e falsos positivos (FP), tomando o
+pulmão como classe positiva:
+
+$$\text{Sens} = \frac{VP}{VP + FN},\quad \text{Espec} = \frac{VN}{VN + FP},\quad \text{VPP} = \frac{VP}{VP + FP},\quad \text{VPN} = \frac{VN}{VN + FN},\quad \text{Acurácia} = \frac{VP + VN}{n}.$$
+
+Como o corte escolhido nos mesmos pacientes em que é avaliado tende a
+superestimar o desempenho, ele é também escolhido apenas com o treino de cada
+fold e aplicado ao teste, nas mesmas repetições da validação cruzada.
+
+## 4.5 Efeito do contraste: delta de Cliff
+
+O efeito do protocolo sobre cada descritor é medido pelo delta de Cliff (Cliff,
+1993), calculado separadamente em cada diagnóstico entre exames com
+($A$) e sem ($B$) contraste:
+
+$$\delta = \frac{1}{n_A n_B} \sum_{i=1}^{n_A} \sum_{j=1}^{n_B} \operatorname{sign}(x_i^A - x_j^B).$$
+
+O índice varia de $-1$ a $1$, não depende de normalidade nem da escala do
+descritor, e convenciona-se $|\delta| < 0{,}147$ como efeito desprezível,
+$< 0{,}33$ pequeno, $< 0{,}474$ médio e acima disso grande (Romano et al.,
+2006). Um descritor integra o conjunto lapidado quando o efeito é desprezível
+nos dois diagnósticos:
+
+$$\max\left(|\delta_{\text{pulmão}}|,\ |\delta_{\text{colorretal}}|\right) < 0{,}147.$$
+
+## 4.6 Random Forest e frequência de seleção
+
+O Random Forest (Breiman, 2001) é ajustado em validação cruzada aninhada: a
+camada externa segue a Seção 4.3, e uma camada interna de 3 folds, dentro de
+cada treino, escolhe o número de descritores sorteados em cada divisão
+(`mtry`). A importância de cada descritor $j$ é medida por permutação nas
+observações *out-of-bag* de cada árvore $t$:
+
+$$\text{VI}_j = \frac{1}{T} \sum_{t=1}^{T} \left( \text{erro}_t^{(j\ \text{permutado})} - \text{erro}_t \right),$$
+
+isto é, a queda média de acurácia quando os valores do descritor são
+embaralhados (Strobl et al., 2007). Em cada ajuste, os $k$ descritores de
+maior importância formam o conjunto selecionado, e a frequência de seleção de
+um descritor é a proporção de ajustes em que ele aparece nesse conjunto.
+
+## 4.7 Agrupamento hierárquico dos descritores
+
+Os descritores são agrupados por dissimilaridade derivada da correlação de
+Spearman em valor absoluto:
+
+$$d_{jl} = 1 - |\rho_{jl}|.$$
+
+Adota-se Spearman porque, ao trabalhar com postos, ela é robusta a assimetria e
+a valores extremos e capta associações monótonas não lineares. O valor absoluto
+é usado porque, para efeito de redundância, importa a intensidade e não o
+sinal: duas variáveis com $\rho = -0{,}99$ carregam essencialmente a mesma
+informação. O agrupamento incide sobre as colunas (variáveis), não sobre os
+pacientes.
+
+Usa-se a ligação média, em que a dissimilaridade entre dois grupos $G$ e $H$ é
+a média das dissimilaridades entre seus membros,
+
+$$D(G, H) = \frac{1}{|G|\,|H|} \sum_{j \in G} \sum_{l \in H} d_{jl},$$
+
+e o dendrograma é cortado em $d = 0{,}20$, o que corresponde a uma correlação
+absoluta média de pelo menos 0,80 entre os grupos unidos. Não há um limiar
+único consagrado: Noortman et al. (2025), com o mesmo conjunto de descritores
+do PyRadiomics, usaram 0,7 e 0,9. O corte foi fixado por critério substantivo,
+e não pela otimização de um índice interno. A qualidade da partição é
+descrita pela largura de silhueta média,
+
+$$s(j) = \frac{b(j) - a(j)}{\max\{a(j), b(j)\}},$$
+
+em que $a(j)$ é a dissimilaridade média de $j$ aos membros do próprio cluster e
+$b(j)$ a menor dissimilaridade média a outro cluster.
+
+## 4.8 Reprodutibilidade da estrutura
+
+A concordância entre duas partições é medida pelo Índice de Rand Ajustado
+(Hubert e Arabie, 1985):
+
+$$\text{ARI} = \frac{\sum_{gh} \binom{n_{gh}}{2} - \left[\sum_g \binom{a_g}{2} \sum_h \binom{b_h}{2}\right] \Big/ \binom{p}{2}}{\frac{1}{2}\left[\sum_g \binom{a_g}{2} + \sum_h \binom{b_h}{2}\right] - \left[\sum_g \binom{a_g}{2} \sum_h \binom{b_h}{2}\right] \Big/ \binom{p}{2}},$$
+
+em que $n_{gh}$ é o número de descritores no grupo $g$ de uma partição e no
+grupo $h$ da outra, e $a_g$ e $b_h$ são os totais marginais. Vale 1 para
+partições idênticas e fica próximo de 0 para concordância equivalente ao acaso.
+
+A partição de referência é comparada com partições obtidas perturbando os
+**dados** (bootstrap, subamostras e metades disjuntas dos pacientes) e o
+**método** (análise de multiverso com duas correlações, três ligações e três
+cortes; Steegen et al., 2016). A estabilidade de cada cluster é avaliada pelo
+critério de Hennig (2007): em cada reamostragem bootstrap, mede-se o Jaccard
+entre o cluster original e o cluster mais parecido da nova partição; a média
+acima de 0,75 indica cluster estável, e até 0,50, dissolvido.
+
+Para verificar se a estrutura depende do diagnóstico ou do protocolo, os
+descritores são agrupados separadamente em cada grupo e as partições são
+comparadas pelo ARI. A distribuição nula vem de $B$ divisões aleatórias dos
+pacientes em grupos de mesmo tamanho, e o p-valor empírico unilateral é
+
+$$p = \frac{1 + \sum_{b=1}^{B} I\left(\text{ARI}_b^{\text{nulo}} \le \text{ARI}_{\text{obs}}\right)}{B + 1},$$
+
+em que $I(\cdot)$ vale 1 quando a condição é verdadeira e 0 caso contrário. A
+soma de 1 ao numerador e ao denominador conta o valor observado como uma das
+possibilidades sob a hipótese nula e impede um p-valor igual a zero (Phipson e
+Smyth, 2010).
+
+**Painel interativo.** O agrupamento A é fixo; clique num descritor do
+agrupamento B para mudá-lo de grupo e veja os pares concordantes e o ARI se
+atualizarem. O exemplo usa seis descritores do estudo, com agrupamentos
+construídos para fins didáticos.
+
+```{=html}
+<style>
+.ari{border:1px solid #DADFE2;border-radius:10px;padding:14px 16px;margin:14px 0 24px;background:#FBFCFC;font-size:14px}
+.ari-chip{display:inline-block;font-size:12px;padding:5px 8px;border-radius:6px;border:1px solid transparent;margin:2px;min-width:96px;text-align:center;user-select:none}
+.ari-clk{cursor:pointer}
+.ari-g1{background:#EEEDFE;color:#3C3489;border-color:#AFA9EC}
+.ari-g2{background:#E6F1FB;color:#0C447C;border-color:#85B7EB}
+.ari-g3{background:#FAEEDA;color:#633806;border-color:#EF9F27}
+.ari-lab{font-size:12.5px;color:#5E6B73}
+.ari-met{background:#EEF2F3;border-radius:8px;padding:7px 12px}
+.ari-met .v{font-size:19px;font-weight:600;color:#1F2A30}
+.ari-btn{border:1px solid #9AA5AB;background:#fff;border-radius:6px;padding:4px 11px;font-size:13px;cursor:pointer}
+</style>
+<div class="ari">
+  <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:center">
+    <span class="ari-lab">Agrupamento A</span><div id="ariA"></div>
+    <span class="ari-lab">Agrupamento B<br>(clique para mudar)</span><div id="ariB"></div>
+  </div>
+  <div style="margin:10px 0 14px 126px">
+    <button class="ari-btn" id="ariId">Idênticos</button>
+    <button class="ari-btn" id="ariTr">Uma troca</button>
+    <button class="ari-btn" id="ariAl">Aleatório</button>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start">
+    <div>
+      <div class="ari-lab" style="margin-bottom:4px">Cada quadrado é um par de descritores</div>
+      <div id="ariGrid"></div>
+      <div class="ari-lab" style="margin-top:8px;line-height:1.8">
+        <span style="display:inline-block;width:11px;height:11px;background:#5DCAA5;margin-right:6px"></span>juntos nos dois (concordam)<br>
+        <span style="display:inline-block;width:11px;height:11px;background:#D3D1C7;margin-right:6px"></span>separados nos dois (concordam)<br>
+        <span style="display:inline-block;width:11px;height:11px;background:#F0997B;margin-right:6px"></span>juntos num, separados no outro (discordam)
+      </div>
+    </div>
+    <div style="flex:1;min-width:230px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="ari-met"><div class="ari-lab">Pares que concordam</div><div class="v" id="ariC"></div></div>
+      <div class="ari-met"><div class="ari-lab">Índice de Rand</div><div class="v" id="ariR"></div></div>
+      <div class="ari-met"><div class="ari-lab">Esperado ao acaso</div><div class="v" id="ariE"></div></div>
+      <div class="ari-met" style="border:1.5px solid #2F6B5E;background:#E3EFEB"><div class="ari-lab">ARI</div><div class="v" id="ariV"></div></div>
+      <div class="ari-lab" style="grid-column:1/-1;font-size:13px;line-height:1.6" id="ariMsg"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var nomes = ["Energy", "TotalEnergy", "ZoneEntropy", "JointAverage", "Autocorrelation", "Range"];
+  var A = [1, 1, 1, 2, 2, 2], B = [1, 1, 2, 2, 2, 2];
+  function $(id) { return document.getElementById(id); }
+  function c2(n) { return n * (n - 1) / 2; }
+  function f(x) { return x.toFixed(2).replace(".", ","); }
+  function chips(el, P, clk) {
+    el.innerHTML = "";
+    P.forEach(function (g, i) {
+      var d = document.createElement("span");
+      d.className = "ari-chip ari-g" + g + (clk ? " ari-clk" : "");
+      d.textContent = nomes[i];
+      if (clk) d.addEventListener("click", function () { B[i] = B[i] % 3 + 1; draw(); });
+      el.appendChild(d);
+    });
+  }
+  function calc(a, b) {
+    var n = a.length, t = {}, ra = {}, cb = {}, k;
+    for (var i = 0; i < n; i++) { k = a[i] + "_" + b[i]; t[k] = (t[k] || 0) + 1; ra[a[i]] = (ra[a[i]] || 0) + 1; cb[b[i]] = (cb[b[i]] || 0) + 1; }
+    var sij = 0, sa = 0, sb = 0;
+    for (k in t) sij += c2(t[k]); for (k in ra) sa += c2(ra[k]); for (k in cb) sb += c2(cb[k]);
+    var tot = c2(n), esp = sa * sb / tot, mx = (sa + sb) / 2, conc = 0;
+    for (var p = 0; p < n; p++) for (var q = p + 1; q < n; q++) if ((a[p] === a[q]) === (b[p] === b[q])) conc++;
+    return {conc: conc, tot: tot, rand: conc / tot, espRand: (esp + (tot - sa - sb + esp)) / tot,
+            ari: Math.abs(mx - esp) < 1e-12 ? 1 : (sij - esp) / (mx - esp)};
+  }
+  function draw() {
+    chips($("ariA"), A, false); chips($("ariB"), B, true);
+    var n = nomes.length, h = '<table style="border-collapse:separate;border-spacing:3px"><tr><td></td>';
+    for (var j = 1; j < n; j++) h += '<td style="font-size:10.5px;color:#5E6B73;text-align:center;width:30px">' + nomes[j].slice(0, 5) + '</td>';
+    h += '</tr>';
+    for (var i = 0; i < n - 1; i++) {
+      h += '<tr><td style="font-size:10.5px;color:#5E6B73;text-align:right;padding-right:4px">' + nomes[i].slice(0, 7) + '</td>';
+      for (j = 1; j < n; j++) {
+        if (j <= i) { h += '<td></td>'; continue; }
+        var ja = A[i] === A[j], jb = B[i] === B[j];
+        var cor = (ja && jb) ? "#5DCAA5" : (!ja && !jb) ? "#D3D1C7" : "#F0997B";
+        h += '<td><div title="' + nomes[i] + ' e ' + nomes[j] + '" style="width:30px;height:30px;border-radius:4px;background:' + cor + '"></div></td>';
+      }
+      h += '</tr>';
+    }
+    $("ariGrid").innerHTML = h + '</table>';
+    var r = calc(A, B);
+    $("ariC").textContent = r.conc + " de " + r.tot; $("ariR").textContent = f(r.rand);
+    $("ariE").textContent = f(r.espRand); $("ariV").textContent = f(r.ari);
+    $("ariMsg").textContent = r.ari > 0.99 ? "Os dois agrupamentos são idênticos: todos os pares concordam e o ARI vale 1." :
+      r.ari > 0.2 ? "O índice de Rand parece alto, mas parte da concordância viria só do acaso. O ARI desconta essa parte." :
+      "A concordância está perto do que se esperaria ao acaso: o ARI fica perto de zero, ou até abaixo.";
+  }
+  $("ariId").addEventListener("click", function () { B = A.slice(); draw(); });
+  $("ariTr").addEventListener("click", function () { B = [1, 1, 2, 2, 2, 2]; draw(); });
+  $("ariAl").addEventListener("click", function () { B = nomes.map(function () { return 1 + Math.floor(Math.random() * 3); }); draw(); });
+  draw();
+})();
+</script>
+```
+
+
+## 4.9 Estabilidade da seleção
+
+A estabilidade é medida nos níveis de descritor e de cluster. No nível de
+cluster, cada descritor selecionado é substituído pelo seu cluster. Usam-se
+dois índices. O **Jaccard** entre dois conjuntos,
+
+$$J(S_a, S_b) = \frac{|S_a \cap S_b|}{|S_a \cup S_b|},$$
+
+calculado entre os ajustes de cada repetição e resumido pela média. O **índice
+$\Phi$** de Nogueira, Sechidis e Brown (2018), definido para os $M$ conjuntos
+selecionados simultaneamente:
+
+$$\hat{\Phi} = 1 - \frac{\frac{1}{p}\sum_{f=1}^{p} s_f^2}{\frac{\bar{k}}{p}\left(1 - \frac{\bar{k}}{p}\right)}, \qquad s_f^2 = \frac{M}{M-1}\,\hat{p}_f(1 - \hat{p}_f),$$
+
+em que $\hat{p}_f$ é a frequência com que a unidade $f$ é selecionada e $\bar{k}$
+o tamanho médio dos conjuntos.
+
+Com poucos clusters de tamanhos desiguais, até seleções aleatórias coincidem
+bastante no nível de cluster. Por isso, cada índice é comparado ao valor
+esperado sob seleção uniforme ao acaso de $k$ descritores, obtido por
+simulação, e reportado também na forma ajustada,
+
+$$\text{ajustado} = \frac{\text{observado} - \text{acaso}}{1 - \text{acaso}}.$$
+
+Por fim, um teste de aleatorização do rótulo verifica se a estabilidade
+depende do sinal do diagnóstico: os diagnósticos são permutados $B$ vezes, a
+análise é refeita, e o p-valor empírico de cada estatística $T$ é
+
+$$p = \frac{1 + \sum_{b=1}^{B} I\left(T_b^{\text{nulo}} \ge T_{\text{obs}}\right)}{B + 1}.$$
+
+## 4.10 Comparação dos modelos
+
+Todos os modelos são ajustados nas mesmas partições, de modo que cada
+repetição $r$ produz uma AUC para cada modelo nos mesmos pacientes. A
+comparação com o modelo base usa a diferença pareada
+$d_r = \text{AUC}_r^{\text{modelo}} - \text{AUC}_r^{\text{base}}$, resumida pela
+média e pelo intervalo de confiança
+
+$$\bar{d} \pm t_{R-1;\,0{,}975}\,\frac{s_d}{\sqrt{R}},$$
+
+e pelo número de repetições em que o modelo supera o base. O ganho de cada
+cluster é avaliado acrescentando ao modelo base, isoladamente, o descritor
+representante (medoide) do cluster. Como as repetições usam os mesmos
+pacientes, os intervalos refletem a variação entre partições, e não a
+incerteza amostral.
+
+\
+
+# 5. Modelo base: esfericidade
+
+## 5.1 Justificativa clínica
+
+Antes de qualquer análise radiômica, define-se um modelo de referência a
+partir da prática clínica, em que a forma da lesão, e em especial a
+irregularidade da borda, está entre os critérios mais importantes para a
+distinção (Seção 1.7).
+
+Essa centralidade da forma é documentada na literatura. Na avaliação de nódulos pulmonares, a
+morfologia da borda é um dos critérios centrais do radiologista, ao lado do
+tamanho (Snoeckx et al., 2018), e os modelos de risco mais usados na prática,
+como o da Mayo Clinic (Swensen et al., 1997) e o de Brock (McWilliams et al.,
+2013), são regressões logísticas que incluem a espiculação da borda entre os
+preditores. Na distinção específica entre adenocarcinoma pulmonar primário e
+metástase pulmonar de câncer colorretal, Lee, Jeong e Kim (2021) observaram
+borda espiculada em 47 % dos cânceres pulmonares primários e em apenas 5 % das
+metástases, enquanto bordas lisas predominaram nas metástases; a margem da
+lesão, isoladamente, alcançou AUC de 0,77 e permaneceu como preditor
+independente numa regressão logística multivariada. Os mesmos autores
+registram que as metástases tendem a apresentar bordas mais irregulares à
+medida que aumentam de tamanho.
+
+Por isso, o modelo base é uma **regressão logística com uma única variável,
+facilmente interpretável pela clínica**: um modelo do dia a dia, que traduz em
+número aquilo que o radiologista já avalia visualmente. Os modelos radiômicos
+das seções seguintes são comparados a ele.
+
+## 5.2 A variável
+
+O banco não contém uma classificação da borda feita pelo radiologista. A
+medida quantitativa disponível que melhor a representa é a **esfericidade**
+(`shape_Sphericity`), definida na documentação do PyRadiomics (van Griethuysen
+et al., 2017) como
+
+$$\text{esfericidade} = \frac{\sqrt[3]{36\pi V^2}}{A},$$
+
+em que $A$ é a área da superfície da lesão e $V$ o seu volume. O numerador é a
+área da superfície de uma esfera com o mesmo volume da lesão. Como a esfera é o
+sólido de menor superfície para um dado volume, a esfericidade vale **1 para
+uma esfera perfeita** e **diminui quanto mais irregular é a borda**: lobulações
+e espículas acrescentam superfície sem acrescentar volume na mesma proporção. A
+medida não tem unidade e não depende, por construção, do tamanho da lesão. Em
+modelos de tumor com graus conhecidos de espiculação, a esfericidade diminuiu
+à medida que a espiculação aumentou e esteve entre os descritores de forma
+menos afetados pelo volume (Limkin et al., 2019).
+
+> **Relação com a compacidade.** A esfericidade é equivalente à compacidade
+> 3D, o análogo tridimensional da compacidade do conjunto Breast Cancer
+> Wisconsin (Street, Wolberg e Mangasarian, 1993): compacidade 3D
+> $= 1/\text{esfericidade}^3 - 1$. As duas ordenam os pacientes da mesma forma
+> e levam ao mesmo desempenho; adota-se a esfericidade por ser o descritor
+> original do PyRadiomics.
+>
+> **Contraste.** A esfericidade é calculada apenas a partir da máscara de
+> segmentação, sem usar as intensidades da imagem (van Griethuysen et al.,
+> 2017), de modo que o contraste não entra diretamente no seu cálculo. Isso não
+> garante, porém, que ela seja independente do protocolo: o contraste pode
+> alterar a nitidez da borda e, com isso, a segmentação, e os pacientes de cada
+> protocolo podem diferir entre si. De fato, pelo critério da Seção 6 a
+> esfericidade **não** teria efeito desprezível nos dois diagnósticos e ficaria
+> fora do conjunto lapidado. Ela é mantida no modelo base por ser a variável
+> indicada pela clínica, e não por critério estatístico; o efeito do protocolo
+> sobre o modelo é avaliado na Seção 5.6.
+
+```{r esfericidade}
+esf_base <- X[, "original_shape_Sphericity"]
+```
+
+## 5.3 Descrição
+
+```{r esf-descricao}
+resumo_q <- function(v) sprintf("%.3f [%.3f; %.3f]", median(v), quantile(v, .25), quantile(v, .75))
+tab_esf <- data.frame(
+  Grupo = c("Pulmão", "Colorretal"),
+  n = c(sum(y == 1), sum(y == 0)),
+  `Esfericidade: mediana [Q1; Q3]` = c(resumo_q(esf_base[y == 1]), resumo_q(esf_base[y == 0])),
+  `Mínimo e máximo` = c(sprintf("%.3f a %.3f", min(esf_base[y == 1]), max(esf_base[y == 1])),
+                        sprintf("%.3f a %.3f", min(esf_base[y == 0]), max(esf_base[y == 0]))),
+  check.names = FALSE)
+
+kable(tab_esf, format = "html", align = c("l", "c", "c", "c"),
+      caption = "Tabela 4. Esfericidade por diagnóstico") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r esf-figura, fig.width=6.5, fig.height=4.5, fig.cap="Figura 1. Esfericidade por diagnóstico. Valores próximos de 1 indicam lesões arredondadas; valores menores, bordas mais irregulares."}
+data.frame(esf = esf_base, dx = factor(ifelse(y == 1, "Pulmão", "Colorretal"),
+                                       levels = c("Colorretal", "Pulmão"))) %>%
+  ggplot(aes(dx, esf)) +
+  geom_boxplot(width = .5, outlier.shape = NA, fill = "grey93", colour = "grey40") +
+  geom_jitter(width = .12, height = 0, alpha = .55, size = 1.8, colour = "#2F6B5E") +
+  labs(x = NULL, y = "Esfericidade (1 = esfera perfeita)") +
+  theme_minimal(base_size = 12)
+```
+
+```{r esf-texto, echo=FALSE}
+rho_esf_vol <- cor(esf_base, X[, "original_shape_MeshVolume"], method = "spearman")
+```
+
+> A esfericidade mediana é de `r fmt(median(esf_base[y == 1]))` nas lesões
+> pulmonares e de `r fmt(median(esf_base[y == 0]))` nas colorretais: as lesões
+> pulmonares são menos esféricas, isto é, têm bordas mais irregulares, como
+> descrito na literatura. Embora a esfericidade não dependa do tamanho por
+> construção, nesta amostra ela tem correlação de Spearman de
+> `r fmt(rho_esf_vol, 2)` com o volume: lesões maiores tendem a ser menos
+> esféricas.
+
+## 5.4 Como é a esfericidade: radiômica inversa
+
+Valores de esfericidade são pouco intuitivos: o que significa, visualmente,
+uma lesão com esfericidade de 0,74 ou de 0,60? Para responder, faz-se o
+caminho inverso da radiômica: em vez de extrair a esfericidade de imagens,
+**geram-se lesões sintéticas com a esfericidade observada nos dados** e
+observa-se a forma resultante.
+
+A abordagem segue a ideia de Limkin et al. (2019), que construíram modelos de
+tumor com graus controlados de espiculação, imprimiram-nos em 3D, obtiveram
+tomografias e mostraram que a esfericidade diminui à medida que a espiculação
+aumenta, sendo um dos descritores de forma menos afetados pelo volume. Aqui, os
+modelos são apenas computacionais:
+
+1. parte-se de uma esfera e acrescentam-se irregularidades à superfície:
+   lobulações largas e médias, sem espículas, nas lesões colorretais
+   (metástases tendem a ter contorno liso ou lobulado; Lee, Jeong e Kim, 2021),
+   e lobulações com espículas nas pulmonares;
+2. a intensidade das irregularidades é ajustada até que a esfericidade
+   coincida com a mediana e com os quartis observados em cada diagnóstico;
+3. cada forma tem o volume mediano do seu grupo e é representada em voxels de
+   1 mm, como as imagens do banco;
+4. a esfericidade é calculada pela malha de superfície obtida pelo algoritmo
+   *marching cubes* (Lorensen e Cline, 1987), como no PyRadiomics.
+
+As formas foram geradas pelo script `radiomica_inversa_voxel.py`, em Python,
+com as bibliotecas NumPy, scikit-image (van der Walt et al., 2014) e
+Matplotlib. A figura é incluída a seguir.
+
+```{r radiomica-inversa, echo=FALSE, out.width="100%", fig.cap="Figura 2. Radiômica inversa: lesões sintéticas com a esfericidade observada nos dados. Linha superior: forma tridimensional; linha inferior: corte axial de maior área, em voxels de 1 mm. Formas ilustrativas, geradas por computador."}
+arq_fig <- "radiomica_inversa_esfericidade.png"
+if (file.exists(arq_fig)) {
+  knitr::include_graphics(arq_fig)
+} else {
+  cat("Figura não encontrada: execute radiomica_inversa_voxel.py na pasta do projeto.")
+}
+```
+
+> **O que a figura mostra.**
+>
+> - **Uma esfera perfeita, representada em voxels de 1 mm, já perde
+>   esfericidade.** Com 9 mm de diâmetro, ela tem esfericidade de 0,919, e não
+>   de 1, porque a superfície em degraus acrescenta área. O efeito é maior em
+>   lesões pequenas, como as colorretais desta amostra, o que está de acordo
+>   com a sensibilidade dos descritores de forma à resolução da imagem relatada
+>   por Limkin et al. (2019).
+> - **A diferença entre os diagnósticos fica visível.** A lesão colorretal
+>   típica (esfericidade de 0,741) é compacta, com contorno ondulado; a
+>   pulmonar típica (0,598) é maior e tem projeções que saem da borda, e o seu
+>   corte axial lembra o aspecto espiculado descrito pelos radiologistas.
+>
+> As lesões são ilustrativas: muitas formas diferentes compartilham a mesma
+> esfericidade, e as apresentadas são apenas exemplos plausíveis de cada grupo.
+
+## 5.5 Regressão logística
+
+O modelo base é uma regressão logística com a esfericidade como único
+preditor. Como a esfericidade varia entre 0 e 1, o efeito é expresso para uma
+**redução de 0,1** na esfericidade, o que corresponde a uma borda visivelmente
+mais irregular.
+
+```{r logit-base}
+fit_base <- glm(y ~ esf_base, family = binomial)
+cf_base  <- summary(fit_base)$coefficients
+ic_base  <- confint.default(fit_base)["esf_base", ]
+rc_01    <- exp(-0.1 * cf_base["esf_base", "Estimate"])
+ic_01    <- sort(exp(-0.1 * ic_base))
+auc_ap   <- as.numeric(auc(roc(y, fitted(fit_base), direction = "<", levels = c(0, 1), quiet = TRUE)))
+
+tab_logit <- data.frame(
+  Termo = c("Intercepto", "Esfericidade"),
+  Coeficiente = round(cf_base[, "Estimate"], 3),
+  `Razão de chances (0,1 a menos de esfericidade)` = c("", sprintf("%.2f", rc_01)),
+  `IC 95 %` = c("", sprintf("[%.2f; %.2f]", ic_01[1], ic_01[2])),
+  `p-valor` = format.pval(cf_base[, "Pr(>|z|)"], digits = 2, eps = .001),
+  check.names = FALSE, row.names = NULL)
+
+kable(tab_logit, format = "html", row.names = FALSE, align = c("l", rep("c", 4)),
+      caption = sprintf("Tabela 5. Regressão logística do modelo base (amostra completa, n = %d; desfecho: pulmão = 1; AUC aparente = %.3f)", n, auc_ap)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+Para estimar o desempenho sem otimismo, o modelo é ajustado na mesma
+validação cruzada repetida usada pelos modelos radiômicos (`r N_SEEDS`
+repetições de `r N_FOLDS` folds, estratificados por diagnóstico e protocolo),
+de modo que todas as comparações da Seção 13 são pareadas.
+
+```{r cv-base}
+estrato <- factor(paste0(ifelse(y == 1, "pulmao", "colorretal"), "_",
+                         ifelse(ct == 1, "com", "sem")))
+
+# Regressão logística em validação cruzada repetida: AUC out-of-fold por semente
+cv_logit <- function(Z, seeds = N_SEEDS) {
+  Z <- as.data.frame(Z)
+  sapply(seq_len(seeds), function(s) {
+    set.seed(1000 + s)
+    folds <- caret::createFolds(estrato, k = N_FOLDS, list = TRUE)
+    oof <- numeric(n)
+    for (te in folds) {
+      tr <- setdiff(seq_len(n), te)
+      m  <- suppressWarnings(glm(y[tr] ~ ., data = Z[tr, , drop = FALSE], family = binomial))
+      oof[te] <- predict(m, newdata = Z[te, , drop = FALSE], type = "response")
+    }
+    as.numeric(auc(roc(y, oof, direction = "<", levels = c(0, 1), quiet = TRUE)))
+  })
+}
+ic_t <- function(x, nivel = .95) {
+  e <- qt(1 - (1 - nivel) / 2, length(x) - 1) * sd(x) / sqrt(length(x)); mean(x) + c(-e, e)
+}
+
+auc_base <- cv_logit(data.frame(esfericidade = esf_base))
+
+data.frame(
+  `Repetições x folds` = sprintf("%d x %d", N_SEEDS, N_FOLDS),
+  `AUC média` = round(mean(auc_base), 3),
+  `Desvio padrão entre repetições` = round(sd(auc_base), 3),
+  `Menor e maior AUC` = sprintf("%.3f a %.3f", min(auc_base), max(auc_base)),
+  check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = "c",
+        caption = "Tabela 6. Desempenho do modelo base na validação cruzada (AUC out-of-fold por repetição)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+## 5.6 O protocolo de contraste afeta o modelo base?
+
+Como a esfericidade não passaria no filtro do contraste, verifica-se o quanto o
+protocolo interfere no modelo base: o efeito do contraste sobre a variável em
+cada diagnóstico (delta de Cliff, como na Seção 6), a capacidade de
+discriminação dentro de cada protocolo e a regressão logística ajustada pelo
+protocolo.
+
+```{r esf-protocolo}
+cliff_esf <- function(a, b) mean(sign(outer(a, b, "-")))
+d_esf_pul <- cliff_esf(esf_base[y == 1 & ct == 1], esf_base[y == 1 & ct == 0])
+d_esf_col <- cliff_esf(esf_base[y == 0 & ct == 1], esf_base[y == 0 & ct == 0])
+auc_prot  <- function(i) as.numeric(auc(roc(y[i], esf_base[i], direction = ">", levels = c(0, 1), quiet = TRUE)))
+m_aj  <- glm(y ~ esf_base + ct, family = binomial)
+m_int <- glm(y ~ esf_base * ct, family = binomial)
+rc_aj <- exp(-0.1 * coef(m_aj)["esf_base"])
+ic_aj <- sort(exp(-0.1 * confint.default(m_aj)["esf_base", ]))
+p_int <- summary(m_int)$coefficients["esf_base:ct", "Pr(>|z|)"]
+
+tab_prot <- data.frame(
+  Grupo = c("Pulmão", "Colorretal"),
+  `Mediana com contraste` = sprintf("%.3f", c(median(esf_base[y == 1 & ct == 1]), median(esf_base[y == 0 & ct == 1]))),
+  `Mediana sem contraste` = sprintf("%.3f", c(median(esf_base[y == 1 & ct == 0]), median(esf_base[y == 0 & ct == 0]))),
+  `Delta de Cliff (com vs. sem)` = round(c(d_esf_pul, d_esf_col), 3),
+  Magnitude = ifelse(abs(c(d_esf_pul, d_esf_col)) < 0.147, "Desprezível",
+                     ifelse(abs(c(d_esf_pul, d_esf_col)) < 0.33, "Pequeno", "Médio ou grande")),
+  check.names = FALSE)
+
+kable(tab_prot, format = "html", row.names = FALSE, align = c("l", "c", "c", "c", "c"),
+      caption = "Tabela 7. Esfericidade por diagnóstico e protocolo de contraste") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+data.frame(
+  Medida = c("AUC entre os exames com contraste", "AUC entre os exames sem contraste",
+             "Razão de chances (0,1 a menos de esfericidade), sem ajuste",
+             "Razão de chances (0,1 a menos de esfericidade), ajustada pelo protocolo",
+             "p-valor da interação esfericidade x protocolo"),
+  Valor = c(sprintf("%.3f (n = %d)", auc_prot(ct == 1), sum(ct == 1)),
+            sprintf("%.3f (n = %d)", auc_prot(ct == 0), sum(ct == 0)),
+            sprintf("%.2f [%.2f; %.2f]", rc_01, ic_01[1], ic_01[2]),
+            sprintf("%.2f [%.2f; %.2f]", rc_aj, ic_aj[1], ic_aj[2]),
+            format.pval(p_int, digits = 2, eps = .001))) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c"),
+        caption = "Tabela 8. Sensibilidade do modelo base ao protocolo de contraste (amostra completa)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r esf-protocolo-figura, fig.width=7.5, fig.height=4.8, fig.cap="Figura 3. Esfericidade por diagnóstico, separada pelo protocolo de contraste. Cada ponto é um paciente."}
+data.frame(esf = esf_base,
+           dx = factor(ifelse(y == 1, "Pulmão", "Colorretal"), levels = c("Colorretal", "Pulmão")),
+           protocolo = factor(ifelse(ct == 1, "Com contraste", "Sem contraste"),
+                              levels = c("Sem contraste", "Com contraste"))) %>%
+  ggplot(aes(dx, esf, fill = protocolo, colour = protocolo)) +
+  geom_boxplot(width = .6, outlier.shape = NA, alpha = .18,
+               position = position_dodge(width = .75)) +
+  geom_point(size = 2, alpha = .75,
+             position = position_jitterdodge(jitter.width = .15, dodge.width = .75, seed = 1)) +
+  scale_fill_manual(values = c("Sem contraste" = "#2A7F84", "Com contraste" = "#E0A030"), name = NULL) +
+  scale_colour_manual(values = c("Sem contraste" = "#1F5F63", "Com contraste" = "#B07A12"), name = NULL) +
+  labs(x = NULL, y = "Esfericidade (1 = esfera perfeita)") +
+  theme_minimal(base_size = 12) + theme(legend.position = "bottom")
+```
+
+> Nos pulmonares, o contraste praticamente não altera a esfericidade (delta de
+> `r fmt(d_esf_pul)`); nos colorretais, as lesões examinadas com contraste são
+> menos esféricas (delta de `r fmt(d_esf_col)`, efeito pequeno), o que as
+> aproxima das pulmonares. Por isso, a discriminação é melhor entre os exames sem
+> contraste (AUC de `r fmt(auc_prot(ct == 0))`) do que entre os com contraste
+> (`r fmt(auc_prot(ct == 1))`). Ainda assim, a esfericidade separa os
+> diagnósticos nos dois protocolos, e o efeito estimado praticamente não muda
+> quando o modelo é ajustado pelo protocolo (razão de chances de
+> `r fmt(rc_01, 2)` sem ajuste e `r fmt(rc_aj, 2)` com ajuste). A interação entre
+> esfericidade e protocolo não é significativa a 5 % (p = `r fmt(p_int)`), mas
+> o tamanho da amostra limita esse teste. Com estes dados, não é possível
+> separar um efeito do contraste sobre a segmentação de diferenças entre os
+> pacientes que realizaram cada exame.
+
+## 5.7 Regra de classificação
+
+Para uso clínico, a probabilidade estimada é convertida numa regra simples:
+lesões com esfericidade **abaixo** de um ponto de corte são classificadas como
+pulmonares. O corte é escolhido pelo índice de Youden, que equilibra
+sensibilidade e especificidade.
+
+```{r corte-clinico}
+roc_esf <- roc(y, esf_base, direction = ">", levels = c(0, 1), quiet = TRUE)
+corte_youden <- coords(roc_esf, "best", best.method = "youden",
+                       ret = c("threshold", "sensitivity", "specificity"), transpose = FALSE)[1, ]
+
+metricas <- function(real, prev) {
+  vp <- sum(real == 1 & prev == 1); fn <- sum(real == 1 & prev == 0)
+  vn <- sum(real == 0 & prev == 0); fp <- sum(real == 0 & prev == 1)
+  c(Sensibilidade = vp / (vp + fn), Especificidade = vn / (vn + fp),
+    `Valor preditivo positivo` = vp / (vp + fp), `Valor preditivo negativo` = vn / (vn + fn),
+    Acurácia = (vp + vn) / length(real))
+}
+
+prev_corte <- as.integer(esf_base < corte_youden$threshold)
+met_ap <- metricas(y, prev_corte)
+
+data.frame(
+  `Ponto de corte (esfericidade)` = sprintf("%.3f", corte_youden$threshold),
+  Regra = sprintf("Abaixo de %.3f: pulmão", corte_youden$threshold),
+  Sensibilidade = pct(met_ap["Sensibilidade"]),
+  Especificidade = pct(met_ap["Especificidade"]),
+  check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = "c",
+        caption = "Tabela 9. Ponto de corte da esfericidade pelo índice de Youden (amostra completa)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+### Tabela de classificação
+
+```{r matriz-confusao}
+mc <- table(Real = factor(y, levels = c(0, 1)), Previsto = factor(prev_corte, levels = c(0, 1)))
+
+tab_mc <- data.frame(
+  `Diagnóstico real` = c("Colorretal", "Pulmão", "Total"),
+  `Classificado como colorretal` = c(mc["0", "0"], mc["1", "0"], sum(mc[, "0"])),
+  `Classificado como pulmão` = c(mc["0", "1"], mc["1", "1"], sum(mc[, "1"])),
+  Total = c(sum(mc["0", ]), sum(mc["1", ]), sum(mc)),
+  check.names = FALSE)
+
+kable(tab_mc, format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+      caption = sprintf("Tabela 10. Classificação pela regra da esfericidade (corte de %.3f; amostra completa)",
+                        corte_youden$threshold)) %>%
+  kable_styling(bootstrap_options = c("condensed", "bordered"), full_width = FALSE) %>%
+  row_spec(3, bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+A tabela acima usa o ponto de corte escolhido nos mesmos pacientes em que é
+avaliado, o que tende a superestimar o desempenho. Para estimar o desempenho
+esperado em pacientes novos, o corte é escolhido pelo índice de Youden **apenas
+com os pacientes de treino** de cada fold e aplicado aos pacientes de teste,
+nas mesmas `r N_SEEDS` repetições da validação cruzada.
+
+```{r corte-cv}
+corte_cv <- lapply(seq_len(N_SEEDS), function(s) {
+  set.seed(1000 + s)
+  folds <- caret::createFolds(estrato, k = N_FOLDS, list = TRUE)
+  prev <- integer(n); cortes <- numeric(length(folds))
+  for (f in seq_along(folds)) {
+    te <- folds[[f]]; tr <- setdiff(seq_len(n), te)
+    r_tr <- roc(y[tr], esf_base[tr], direction = ">", levels = c(0, 1), quiet = TRUE)
+    cortes[f] <- coords(r_tr, "best", best.method = "youden", ret = "threshold",
+                        transpose = FALSE)[1, 1]
+    prev[te] <- as.integer(esf_base[te] < cortes[f])
+  }
+  list(prev = prev, cortes = cortes)
+})
+
+met_cv    <- t(sapply(corte_cv, function(r) metricas(y, r$prev)))
+cortes_cv <- unlist(lapply(corte_cv, `[[`, "cortes"))
+mc_cv     <- Reduce(`+`, lapply(corte_cv, function(r)
+  table(factor(y, levels = c(0, 1)), factor(r$prev, levels = c(0, 1))))) / N_SEEDS
+
+tab_met <- data.frame(
+  Medida = colnames(met_cv),
+  `Amostra completa` = pct(met_ap),
+  `Validação cruzada: média` = pct(colMeans(met_cv)),
+  `Validação cruzada: menor e maior` = sprintf("%s a %s", pct(apply(met_cv, 2, min)), pct(apply(met_cv, 2, max))),
+  check.names = FALSE, row.names = NULL)
+
+kable(tab_met, format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+      caption = sprintf("Tabela 11. Desempenho da regra de classificação: amostra completa e validação cruzada (%d repetições; corte escolhido no treino de cada fold)", N_SEEDS)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r corte-cv-texto, echo=FALSE}
+n_col <- sum(y == 0); n_pul <- sum(y == 1)
+```
+
+> Na validação cruzada, os pontos de corte escolhidos nos treinos variaram de
+> `r fmt(min(cortes_cv))` a `r fmt(max(cortes_cv))` (mediana de
+> `r fmt(median(cortes_cv))`). Em média por repetição, a regra classificou
+> corretamente `r fmt(mc_cv["1", "1"], 1)` dos `r n_pul` pacientes pulmonares e
+> `r fmt(mc_cv["0", "0"], 1)` dos `r n_col` colorretais.
+
+<div style="border-left: 4px solid #2F6B5E; background: #F1F6F4; padding: 12px 18px; margin: 18px 0; border-radius: 0 6px 6px 0;">
+
+**Como ler o modelo base**
+
+- **Efeito da irregularidade.** A cada redução de 0,1 na esfericidade, a
+  chance de a lesão ser pulmonar é multiplicada por **`r fmt(rc_01, 2)`**
+  (IC 95 %: `r fmt(ic_01[1], 2)` a `r fmt(ic_01[2], 2)`). Bordas mais
+  irregulares indicam maior probabilidade de adenocarcinoma pulmonar, em
+  acordo com a indicação clínica e com a literatura.
+- **Capacidade de discriminação.** Na validação cruzada, o modelo alcança AUC
+  de **`r fmt(mean(auc_base))`**: em cerca de `r pct(mean(auc_base))` dos pares
+  formados por um paciente de cada diagnóstico, a lesão pulmonar recebe maior
+  probabilidade de ser pulmonar. O desempenho praticamente não varia entre as
+  repetições (desvio padrão de `r fmt(sd(auc_base))`).
+- **Uso clínico.** Lesões com esfericidade abaixo de
+  **`r fmt(corte_youden$threshold)`** são classificadas como pulmonares, com
+  sensibilidade de `r pct(met_ap["Sensibilidade"])` e especificidade de
+  `r pct(met_ap["Especificidade"])` na amostra completa. O modelo identifica bem
+  as lesões pulmonares, mas classifica como pulmonar parte das colorretais com
+  borda irregular, em geral as maiores.
+- **Desempenho esperado em pacientes novos.** Escolhendo o corte apenas com
+  os pacientes de treino, a sensibilidade média é de
+  `r pct(mean(met_cv[, "Sensibilidade"]))` e a especificidade, de
+  `r pct(mean(met_cv[, "Especificidade"]))`. Essa é a estimativa mais honesta
+  do desempenho da regra; uma validação em outra amostra ainda seria
+  necessária.
+
+</div>
+
+\
+
+# 6. Efeito do contraste sobre cada descritor
+
+## 6.1 Método
+
+O efeito do contraste é medido, para cada descritor, pelo **delta de Cliff**
+entre exames com e sem contraste (Cliff, 1993):
+
+$$\delta = P(X_{\text{com}} > X_{\text{sem}}) - P(X_{\text{com}} < X_{\text{sem}}).$$
+
+O delta compara todos os pares formados por um paciente com contraste e um sem
+contraste. Varia de $-1$ a $1$, é zero quando os dois grupos se sobrepõem
+completamente, não depende da escala do descritor e é robusto a assimetria e a
+valores extremos, frequentes em descritores radiômicos.
+
+O cálculo é feito **separadamente em cada diagnóstico**, de modo que a
+comparação seja sempre entre pacientes com o mesmo tipo de tumor. Um descritor
+é considerado **sem efeito do contraste** quando o efeito é desprezível nos dois
+diagnósticos:
+
+$$|\delta_{\text{pulmão}}| < 0{,}147 \quad \text{e} \quad |\delta_{\text{colorretal}}| < 0{,}147.$$
+
+O limiar de 0,147 é o limite superior do efeito desprezível na convenção de
+Romano et al. (2006), que classifica $|\delta|$ em desprezível (até 0,147),
+pequeno (até 0,33), médio (até 0,474) e grande.
+
+Esse critério é mais exigente do que usar a média dos dois deltas: na média,
+efeitos de sinais opostos nos dois diagnósticos podem se cancelar. A lapidação
+usa apenas o protocolo e os descritores, nunca o desfecho, e por isso não
+introduz vazamento de informação sobre o diagnóstico nas etapas seguintes.
+
+## 6.2 Cálculo
+
+```{r cliff}
+cliff_delta <- function(a, b) mean(sign(outer(a, b, "-")))
+
+efeito <- data.frame(
+  descritor        = feat,
+  familia          = familia,
+  delta_pulmao     = sapply(seq_len(p), function(j)
+                       cliff_delta(X[y == 1 & ct == 1, j], X[y == 1 & ct == 0, j])),
+  delta_colorretal = sapply(seq_len(p), function(j)
+                       cliff_delta(X[y == 0 & ct == 1, j], X[y == 0 & ct == 0, j])))
+
+efeito$max_abs <- pmax(abs(efeito$delta_pulmao), abs(efeito$delta_colorretal))
+efeito$desprezivel <- efeito$max_abs < LIM_DESPREZIVEL
+
+classifica <- function(a) cut(a, c(-Inf, .147, .33, .474, Inf), right = FALSE,
+                              labels = c("Desprezível", "Pequeno", "Médio", "Grande"))
+efeito$mag_pulmao     <- classifica(abs(efeito$delta_pulmao))
+efeito$mag_colorretal <- classifica(abs(efeito$delta_colorretal))
+
+cat("Descritores com efeito desprezível nos dois diagnósticos:",
+    sum(efeito$desprezivel), "de", p, "\n")
+```
+
+```{r cliff-familia}
+fam_niv <- names(sort(table(familia), decreasing = TRUE))
+tab_fam <- efeito %>%
+  mutate(familia = factor(familia, fam_niv)) %>%
+  group_by(Família = familia) %>%
+  summarise(Total = n(),
+            `Desprezível no pulmão` = sum(mag_pulmao == "Desprezível"),
+            `Desprezível no colorretal` = sum(mag_colorretal == "Desprezível"),
+            `Desprezível nos dois` = sum(desprezivel), .groups = "drop")
+tab_fam <- rbind(tab_fam, data.frame(Família = "Total", t(colSums(tab_fam[, -1])),
+                                     check.names = FALSE))
+
+kable(tab_fam, format = "html", align = c("l", rep("c", 4)),
+      caption = "Tabela 12. Descritores com efeito desprezível do contraste, por família") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  row_spec(nrow(tab_fam), bold = TRUE)
+```
+
+```{r cliff-figura, fig.width=7, fig.height=6.5, fig.cap="Figura 4. Delta de Cliff (com contraste contra sem contraste) nos colorretais e nos pulmonares. O quadrado tracejado delimita a região de efeito desprezível nos dois diagnósticos; os descritores dentro dele formam o conjunto lapidado."}
+lim <- LIM_DESPREZIVEL
+ggplot(efeito, aes(delta_colorretal, delta_pulmao)) +
+  annotate("rect", xmin = -lim, xmax = lim, ymin = -lim, ymax = lim,
+           fill = "#E3EFEB", colour = "grey30", linetype = 2) +
+  geom_hline(yintercept = 0, colour = "grey85") +
+  geom_vline(xintercept = 0, colour = "grey85") +
+  geom_point(aes(colour = desprezivel), size = 2.3, alpha = .85) +
+  scale_colour_manual(values = c(`TRUE` = "#2F6B5E", `FALSE` = "#B5BCC2"),
+                      labels = c(`TRUE` = "Desprezível nos dois", `FALSE` = "Efeito em ao menos um"),
+                      name = NULL) +
+  coord_equal(xlim = c(-.8, .8), ylim = c(-.8, .8)) +
+  labs(x = "Delta de Cliff nos colorretais", y = "Delta de Cliff nos pulmonares") +
+  theme_minimal(base_size = 11) + theme(legend.position = "bottom")
+```
+
+<details><summary><b>Tabela 13. Delta de Cliff dos 105 descritores</b> (clique para abrir)</summary>
+
+```{r cliff-tabela-completa}
+efeito %>%
+  arrange(max_abs) %>%
+  transmute(Descritor = nome(descritor), Família = familia,
+            `Delta pulmão` = round(delta_pulmao, 3), `Magnitude pulmão` = mag_pulmao,
+            `Delta colorretal` = round(delta_colorretal, 3), `Magnitude colorretal` = mag_colorretal,
+            `Sem efeito do contraste` = ifelse(desprezivel, "sim", "não")) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", rep("c", 5))) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 12) %>%
+  row_spec(which(sort(efeito$max_abs) < LIM_DESPREZIVEL), background = "#E3EFEB") %>%
+  scroll_box(height = "520px")
+```
+
+</details>
+
+\
+
+# 7. O conjunto lapidado
+
+```{r lapida}
+X_full <- X; feat_full <- feat; familia_full <- familia; p_full <- p
+
+keep    <- which(efeito$desprezivel)
+X       <- X_full[, keep, drop = FALSE]
+feat    <- feat_full[keep]
+familia <- familia_full[keep]
+p       <- ncol(X)
+
+cat("Conjunto lapidado:", p, "descritores | razão p/n =", round(p / n, 2), "\n")
+```
+
+```{r lapida-tabela}
+efeito[keep, ] %>%
+  mutate(ordem = match(familia, fam_niv)) %>%
+  arrange(ordem, max_abs) %>%
+  transmute(Descritor = nome(descritor), Família = familia,
+            `Delta pulmão` = round(delta_pulmao, 3),
+            `Delta colorretal` = round(delta_colorretal, 3)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c"),
+        caption = sprintf("Tabela 14. Os %d descritores sem efeito do contraste nos dois diagnósticos", p)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r lapida-texto, echo=FALSE}
+n_shape <- sum(familia == "shape"); n_shape_tot <- sum(familia_full == "shape")
+```
+
+> O conjunto lapidado reúne `r p` dos `r p_full` descritores
+> (`r pct(p / p_full)`), com razão $p/n \approx$ `r fmt(p / n, 2)`. Apenas
+> `r n_shape` dos `r n_shape_tot` descritores de forma permaneceram. Como a forma
+> depende apenas da segmentação, a exclusão dos demais reflete diferenças entre
+> os pacientes que fizeram cada tipo de exame, e não um efeito físico do
+> contraste: o protocolo não foi atribuído ao acaso.
+
+\
+
+# 8. Seleção de variáveis no conjunto lapidado
+
+## 8.1 Procedimento
+
+A pergunta é quais descritores lapidados o modelo escolhe com mais frequência.
+O Random Forest não seleciona variáveis por conta própria: ele atribui uma
+importância a todos os descritores. O conjunto selecionado em cada ajuste é
+formado pelos $k$ descritores de maior importância, e a **frequência de
+seleção** de um descritor é a proporção de ajustes em que ele aparece nesse
+conjunto.
+
+O desenho de validação é o seguinte:
+
+- **Validação cruzada externa** com `r N_FOLDS` folds, repetida em
+  `r N_SEEDS` sementes, totalizando `r N_SEEDS * N_FOLDS` ajustes. Cada ajuste
+  usa cerca de 4/5 dos pacientes, e a variação entre os ajustes mostra o quanto
+  a seleção depende da amostra.
+- **Validação cruzada interna** com `r N_FOLDS_I` folds, dentro do treino de
+  cada fold externo, usada apenas para escolher o `mtry` (número de descritores
+  sorteados em cada divisão das árvores).
+- **Estratificação conjunta por diagnóstico e protocolo**, para que todos os
+  folds tenham composição semelhante nos quatro grupos.
+- **Importância por permutação** (`MeanDecreaseAccuracy`): queda da acurácia
+  quando o descritor é embaralhado nos pacientes não usados no treino de cada
+  árvore. A importância por redução de impureza de Gini é enviesada em favor de
+  variáveis com muitos pontos de corte possíveis (Strobl et al., 2007).
+- **Padronização estimada apenas no treino** de cada fold. Não altera o Random
+  Forest, mas mantém o pipeline pronto para modelos que dependem de escala.
+
+```{r estrato}
+estrato <- factor(paste0(ifelse(y == 1, "pulmao", "colorretal"), "_",
+                         ifelse(ct == 1, "com", "sem")))
+print(table(estrato))
+```
+
+```{r funcao-cv}
+roda_rf <- function(Xu = X, yy = y, estratos = estrato, seeds = N_SEEDS) {
+  pu <- ncol(Xu); nn <- nrow(Xu)
+  imp      <- matrix(NA_real_, nrow = seeds * N_FOLDS, ncol = pu,
+                     dimnames = list(NULL, colnames(Xu)))
+  seed_fit <- integer(seeds * N_FOLDS)
+  mtry_esc <- integer(seeds * N_FOLDS)
+  auc_fold <- numeric(seeds * N_FOLDS)
+  oof      <- matrix(NA_real_, nrow = seeds, ncol = nn)
+  grade    <- unique(round(c(sqrt(pu), pu / 8, pu / 4, pu / 2)))
+  grade    <- grade[grade >= 1]
+  linha    <- 0
+
+  for (s in seq_len(seeds)) {
+    set.seed(1000 + s)
+    folds <- caret::createFolds(estratos, k = N_FOLDS, list = TRUE)
+
+    for (te in folds) {
+      linha <- linha + 1; seed_fit[linha] <- s
+      tr <- setdiff(seq_len(nn), te)
+
+      mu <- colMeans(Xu[tr, , drop = FALSE])
+      sg <- apply(Xu[tr, , drop = FALSE], 2, sd); sg[sg == 0] <- 1
+      Xtr <- scale(Xu[tr, , drop = FALSE], mu, sg)
+      Xte <- scale(Xu[te, , drop = FALSE], mu, sg)
+
+      # escolha do mtry por validação cruzada interna (AUC)
+      set.seed(2000 + linha)
+      fi <- caret::createFolds(factor(yy[tr]), k = N_FOLDS_I, list = TRUE)
+      desemp <- sapply(grade, function(mt) mean(sapply(fi, function(vi) {
+        ti <- setdiff(seq_along(tr), vi)
+        mm <- randomForest(Xtr[ti, , drop = FALSE], factor(yy[tr][ti]),
+                           ntree = NTREE_TUN, mtry = mt)
+        pp <- predict(mm, Xtr[vi, , drop = FALSE], type = "prob")[, "1"]
+        as.numeric(auc(roc(yy[tr][vi], pp, direction = "<", levels = c(0, 1), quiet = TRUE)))
+      })))
+      mtry_esc[linha] <- grade[which.max(desemp)]
+
+      # ajuste final no treino do fold
+      set.seed(3000 + linha)
+      m <- randomForest(Xtr, factor(yy[tr]), ntree = NTREE,
+                        mtry = mtry_esc[linha], importance = TRUE)
+      imp[linha, ] <- importance(m, type = 1)[, 1]
+      pr <- predict(m, Xte, type = "prob")[, "1"]
+      oof[s, te] <- pr
+      auc_fold[linha] <- as.numeric(auc(roc(yy[te], pr, direction = "<",
+                                            levels = c(0, 1), quiet = TRUE)))
+    }
+  }
+  auc_semente <- apply(oof, 1, function(pp)
+    as.numeric(auc(roc(yy, pp, direction = "<", levels = c(0, 1), quiet = TRUE))))
+  list(imp = imp, seed_fit = seed_fit, mtry = mtry_esc,
+       auc_fold = auc_fold, auc_semente = auc_semente)
+}
+```
+
+## 8.2 Execução
+
+```{r executa, cache=TRUE, cache.extra=list(X, y, estrato, N_SEEDS, N_FOLDS, N_FOLDS_I, NTREE, NTREE_TUN)}
+t0 <- Sys.time()
+rf <- roda_rf()
+cat("Ajustes:", nrow(rf$imp), "| tempo:",
+    round(difftime(Sys.time(), t0, units = "mins"), 1), "minutos\n")
+cat("mtry escolhido (frequência):\n"); print(table(rf$mtry))
+```
+
+## 8.3 Desempenho
+
+```{r auc}
+tab_auc <- data.frame(
+  Estimativa = c("Média entre folds", "Por semente (predições out-of-fold)"),
+  Réplicas   = c(length(rf$auc_fold), length(rf$auc_semente)),
+  `AUC média` = round(c(mean(rf$auc_fold), mean(rf$auc_semente)), 3),
+  `Desvio padrão` = round(c(sd(rf$auc_fold), sd(rf$auc_semente)), 3),
+  check.names = FALSE)
+kable(tab_auc, format = "html", align = c("l", "c", "c", "c"),
+      caption = "Tabela 15. Desempenho do Random Forest no conjunto lapidado") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> A AUC por semente, calculada com as predições de todos os pacientes em cada
+> repetição, foi de `r fmt(mean(rf$auc_semente))`
+> (DP = `r fmt(sd(rf$auc_semente))`). A AUC mede a capacidade de ordenar
+> corretamente um paciente de cada diagnóstico; 0,5 corresponde ao acaso.
+
+## 8.4 Frequência de seleção
+
+```{r frequencia}
+freq_k <- function(k) {
+  sel <- t(apply(rf$imp, 1, function(v) {
+    o <- order(v, decreasing = TRUE)[seq_len(k)]
+    o <- o[v[o] > 0]                      # só entra se a importância for positiva
+    seq_along(v) %in% o
+  }))
+  colMeans(sel)
+}
+frq <- sapply(K_GRID, freq_k); colnames(frq) <- paste0("k = ", K_GRID)
+
+posto <- t(apply(-rf$imp, 1, rank, ties.method = "average"))  # 1 = mais importante
+
+tab_freq <- data.frame(
+  Descritor = nome(feat),
+  Família   = familia,
+  frq,
+  `Posto médio` = colMeans(posto),
+  `Importância média` = colMeans(rf$imp),
+  check.names = FALSE, row.names = NULL)
+ref <- paste0("k = ", TOP_K)
+tab_freq <- tab_freq[order(-tab_freq[[ref]], tab_freq$`Posto médio`), ]
+
+tab_freq %>%
+  mutate(across(starts_with("k ="), ~ pct(.x)),
+         `Posto médio` = round(`Posto médio`, 1),
+         `Importância média` = round(`Importância média`, 2)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", rep("c", length(K_GRID) + 2)),
+        caption = sprintf("Tabela 16. Frequência de seleção em %d ajustes, por tamanho do conjunto selecionado", nrow(rf$imp))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(tab_freq[[ref]] >= 0.95), bold = TRUE, background = "#E3EFEB")
+```
+
+```{r freq-figura, fig.width=8, fig.height=5.5, fig.cap=sprintf("Figura 5. Frequência com que cada descritor lapidado aparece entre os %d mais importantes de cada ajuste. A linha tracejada marca a frequência esperada se a seleção fosse ao acaso (k/p).", TOP_K)}
+data.frame(Descritor = factor(tab_freq$Descritor, rev(tab_freq$Descritor)),
+           freq = tab_freq[[ref]], Família = tab_freq$Família) %>%
+  ggplot(aes(freq, Descritor, fill = Família)) +
+  geom_col(width = .7) +
+  geom_vline(xintercept = TOP_K / p, linetype = 2, colour = "grey40") +
+  scale_x_continuous(labels = function(x) paste0(x * 100, " %"), limits = c(0, 1)) +
+  labs(x = sprintf("Frequência de seleção (k = %d)", TOP_K), y = NULL) +
+  theme_minimal(base_size = 11)
+```
+
+```{r freq-texto, echo=FALSE}
+top    <- tab_freq[tab_freq[[ref]] >= 0.95, ]
+rho_top <- if (nrow(top) >= 2) {
+  idx <- match(paste0("original_", top$Descritor[1:2]), feat)
+  abs(cor(X[, idx[1]], X[, idx[2]], method = "spearman"))
+} else NA
+acaso <- TOP_K / p
+tem_energy <- "original_firstorder_Energy" %in% paste0("original_", top$Descritor)
+rho_vol <- abs(cor(X_full[, "original_firstorder_Energy"],
+                   X_full[, "original_shape_VoxelVolume"], method = "spearman"))
+```
+
+> Com $k =$ `r TOP_K`, se os descritores fossem escolhidos ao acaso, cada um
+> apareceria em cerca de `r pct(acaso)` dos ajustes. `r nrow(top)` descritor(es)
+> foram selecionados em pelo menos 95 % dos ajustes:
+> `r paste0("<code>", top$Descritor, "</code> (", pct(top[[ref]]), ")", collapse = ", ")`.
+> `r if (!is.na(rho_top)) paste0("Os dois primeiros têm correlação de Spearman de ", fmt(rho_top), " em valor absoluto, ou seja, são praticamente o mesmo descritor.") else ""`
+> `r if (tem_energy) paste0("A documentação do PyRadiomics indica que Energy e TotalEnergy são confundidos pelo volume da lesão, pois somam valores sobre todos os voxels (van Griethuysen et al., 2017). Na amostra, a correlação de Spearman entre Energy e VoxelVolume é de ", fmt(rho_vol), " em valor absoluto: embora o VoxelVolume tenha sido excluído pela lapidação, a informação de tamanho da lesão permanece no conjunto por meio desses descritores.") else ""`
+> Os demais se revezam entre os ajustes, o que motiva a etapa seguinte:
+> verificar se esse revezamento ocorre entre descritores redundantes.
+
+\
+
+# 9. Agrupamento dos descritores lapidados
+
+## 9.1 Método
+
+Os descritores são agrupados por agrupamento hierárquico, com dissimilaridade
+derivada da correlação de Spearman em valor absoluto:
+
+$$d_{ij} = 1 - |\rho_{ij}|.$$
+
+A correlação de Spearman trabalha com postos, por isso é robusta a assimetria e
+a valores extremos e capta associações monótonas não lineares. O valor absoluto
+é usado porque, para efeito de redundância, importa a intensidade da associação
+e não o sinal: dois descritores com $\rho = -0{,}99$ carregam a mesma informação.
+
+O agrupamento incide sobre as **colunas** (descritores), não sobre os
+pacientes. Usa-se a ligação média (*average linkage*), em que dois grupos são
+unidos quando a dissimilaridade média entre seus membros é pequena, e o
+dendrograma é cortado em $d =$ `r fmt(CORTE, 2)`, o que corresponde a uma correlação
+absoluta média de pelo menos `r fmt(1 - CORTE, 2)` entre os grupos unidos. O
+corte foi fixado por critério substantivo, e não pela otimização de um índice
+interno; Noortman et al. (2025), com o mesmo conjunto de descritores do
+PyRadiomics, usaram os limiares de 0,7 e 0,9, que são avaliados como
+sensibilidade na Seção 10.2.
+
+```{r funcoes-cluster}
+# Partição do espaço de descritores por distância de correlação
+particao <- function(Xm, metodo = "spearman", ligacao = "average", h = CORTE) {
+  r <- suppressWarnings(cor(Xm, method = metodo)); r[is.na(r)] <- 0
+  D <- 1 - abs(r); diag(D) <- 0; D <- (D + t(D)) / 2
+  cutree(hclust(as.dist(D), method = ligacao), h = h)
+}
+dist_ref <- function(Xm, metodo = "spearman") {
+  r <- suppressWarnings(cor(Xm, method = metodo)); r[is.na(r)] <- 0
+  D <- 1 - abs(r); diag(D) <- 0; D <- (D + t(D)) / 2
+  as.dist(D)
+}
+# Índice de Rand Ajustado entre duas partições
+ari <- function(a, b) {
+  tb <- table(a, b)
+  s_ij <- sum(choose(tb, 2)); s_a <- sum(choose(rowSums(tb), 2)); s_b <- sum(choose(colSums(tb), 2))
+  esp <- s_a * s_b / choose(sum(tb), 2); mx <- (s_a + s_b) / 2
+  if (isTRUE(all.equal(mx, esp))) return(1)
+  (s_ij - esp) / (mx - esp)
+}
+# Jaccard entre dois conjuntos
+jaccard <- function(a, b) { u <- length(union(a, b)); if (u == 0) 1 else length(intersect(a, b)) / u }
+```
+
+## 9.2 Redundância
+
+```{r redundancia}
+rho  <- cor(X, method = "spearman")
+Aabs <- abs(rho); diag(Aabs) <- 0
+vpar <- Aabs[upper.tri(Aabs)]
+limiares <- c(0.70, 0.80, 0.90, 0.99)
+
+tab_red <- data.frame(
+  Limiar = sprintf("|rho| >= %.2f", limiares),
+  Pares  = sapply(limiares, function(t) sum(vpar >= t)),
+  `% dos pares` = sprintf("%.1f %%", 100 * sapply(limiares, function(t) mean(vpar >= t))),
+  `Descritores com ao menos um par` = sapply(limiares, function(t) sum(rowSums(Aabs >= t) > 0)),
+  check.names = FALSE)
+
+kable(tab_red, format = "html", align = c("l", "c", "c", "c"),
+      caption = sprintf("Tabela 17. Redundância entre os %d descritores lapidados (%d pares)",
+                        p, choose(p, 2))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r red-texto, echo=FALSE}
+n80 <- sum(rowSums(Aabs >= 0.80) > 0); n90 <- sum(rowSums(Aabs >= 0.90) > 0)
+```
+
+> Mesmo após a lapidação, `r n80` dos `r p` descritores têm ao menos um par com
+> $|\rho| \geq 0{,}80$, e `r n90` têm par com $|\rho| \geq 0{,}90$. A redundância
+> continua sendo uma característica central do conjunto.
+
+## 9.3 Visualização
+
+```{r heatmap, fig.width=10, fig.height=8.5, fig.cap="Figura 6. Correlação de Spearman entre os descritores lapidados, reordenada pelo agrupamento hierárquico. Blocos na diagonal indicam conjuntos de descritores redundantes."}
+pheatmap(rho,
+         color = colorRampPalette(c("#5B8FC7", "#FFFFFF", "#E07A62"))(100),
+         breaks = seq(-1, 1, length.out = 101), number_color = "grey10",
+         clustering_distance_rows = dist_ref(X), clustering_distance_cols = dist_ref(X),
+         clustering_method = "average",
+         display_numbers = TRUE, number_format = "%.2f", fontsize_number = 6.5,
+         labels_row = nome(feat), labels_col = nome(feat),
+         fontsize_row = 8, fontsize_col = 8, angle_col = 45,
+         border_color = "white", main = "")
+```
+
+```{r dendrograma, fig.width=10, fig.height=5, fig.cap="Figura 7. Dendrograma dos descritores lapidados. A linha tracejada marca o corte adotado; os retângulos delimitam os clusters."}
+hc_ref <- hclust(dist_ref(X), method = "average")
+par(mar = c(1, 4, 1, 1))
+plot(hc_ref, labels = nome(feat), cex = 0.75, hang = -1,
+     main = "", xlab = "", sub = "", ylab = "Dissimilaridade  d = 1 - |rho|")
+abline(h = CORTE, lty = 2, col = "firebrick", lwd = 1.5)
+rect.hclust(hc_ref, h = CORTE, border = "grey40")
+```
+
+## 9.4 Ponto de corte
+
+```{r silhueta, fig.width=8, fig.height=4, fig.cap="Figura 8. Largura de silhueta média em função do corte. O ponto vermelho é o corte adotado."}
+d_obj  <- dist_ref(X)
+cortes <- seq(0.05, 0.60, by = 0.025)
+df_sil <- data.frame(
+  corte = cortes,
+  silhueta = sapply(cortes, function(h) {
+    g <- cutree(hc_ref, h = h)
+    if (length(unique(g)) < 2 || length(unique(g)) >= p) return(NA_real_)
+    mean(silhouette(g, d_obj)[, "sil_width"])
+  }),
+  k = sapply(cortes, function(h) max(cutree(hc_ref, h = h))))
+
+ggplot(df_sil, aes(corte, silhueta)) +
+  geom_line(colour = "grey40") + geom_point(size = 1.6, colour = "grey30") +
+  geom_point(data = subset(df_sil, abs(corte - CORTE) < 1e-8), size = 3.5, colour = "firebrick") +
+  labs(x = "Ponto de corte  d = 1 - |rho|", y = "Largura de silhueta média") +
+  theme_minimal(base_size = 12)
+```
+
+```{r silhueta-tab}
+df_sil %>%
+  filter(round(corte, 3) %in% c(0.10, 0.15, 0.20, 0.25, 0.30, 0.40)) %>%
+  mutate(silhueta = round(silhueta, 3)) %>%
+  setNames(c("Corte (d)", "Silhueta média", "N.º de clusters")) %>%
+  kable(format = "html", align = "c",
+        caption = "Tabela 18. Qualidade do agrupamento em cortes selecionados") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r sil-texto, echo=FALSE}
+sil_max_corte <- df_sil$corte[which.max(df_sil$silhueta)]
+sil_no_corte  <- df_sil$silhueta[which.min(abs(df_sil$corte - CORTE))]
+```
+
+> No corte adotado ($d =$ `r fmt(CORTE, 2)`), a silhueta média é de
+> `r fmt(sil_no_corte)`; o maior valor ocorre em $d =$ `r fmt(sil_max_corte)`.
+> O corte não foi escolhido para maximizar esse índice, e sim por corresponder a
+> uma associação forte entre descritores. A influência dessa escolha é avaliada
+> na Seção 10.2.
+
+## 9.5 Partição de referência
+
+```{r particao-ref}
+lab_ref <- particao(X)
+K_REF   <- max(lab_ref)
+cat("Clusters:", K_REF, "| unitários:", sum(table(lab_ref) == 1),
+    "| maior cluster:", max(table(lab_ref)), "descritores\n")
+```
+
+```{r composicao}
+Dm <- as.matrix(d_obj)
+medoide <- function(idx) {
+  if (length(idx) == 1) return(feat[idx])
+  feat[idx[which.min(rowMeans(Dm[idx, idx, drop = FALSE]))]]
+}
+coesao_cl <- function(idx) {
+  if (length(idx) == 1) return(NA_real_)
+  b <- abs(rho[idx, idx]); mean(b[upper.tri(b)])
+}
+ordem <- as.integer(names(sort(table(lab_ref), decreasing = TRUE)))
+comp <- data.frame(
+  Cluster  = paste0("C", ordem),
+  Tamanho  = as.integer(table(lab_ref)[as.character(ordem)]),
+  Medoide  = sapply(ordem, function(cc) nome(medoide(which(lab_ref == cc)))),
+  Descritores = sapply(ordem, function(cc) paste(nome(feat[lab_ref == cc]), collapse = ", ")),
+  Famílias = sapply(ordem, function(cc) {
+    tf <- sort(table(familia[lab_ref == cc]), decreasing = TRUE)
+    paste0(names(tf), " (", tf, ")", collapse = ", ") }),
+  `Coesão (|rho| médio)` = sapply(ordem, function(cc) {
+    v <- coesao_cl(which(lab_ref == cc)); if (is.na(v)) "" else sprintf("%.2f", v) }),
+  check.names = FALSE, row.names = NULL)
+
+kable(comp, format = "html", row.names = FALSE, align = c("l", "c", "l", "l", "l", "c"),
+      caption = "Tabela 19. Composição dos clusters do conjunto lapidado") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), font_size = 13) %>%
+  column_spec(4, width = "45%")
+```
+
+```{r heatmap-agregado, fig.width=6.5, fig.height=5.5, fig.cap="Figura 9. Correlação absoluta média de Spearman dentro de cada cluster (diagonal) e entre clusters (fora da diagonal)."}
+niv <- sort(unique(lab_ref)); gr <- split(seq_along(feat), lab_ref)
+Cmed <- matrix(NA_real_, K_REF, K_REF, dimnames = list(paste0("C", niv), paste0("C", niv)))
+for (i in seq_len(K_REF)) for (j in seq_len(K_REF)) {
+  bloco <- abs(rho[gr[[i]], gr[[j]], drop = FALSE])
+  Cmed[i, j] <- if (i == j) { v <- bloco[upper.tri(bloco)]; if (length(v)) mean(v) else NA_real_ }
+                else mean(bloco)
+}
+oc <- order(sapply(gr, length), decreasing = TRUE)
+Cmed <- Cmed[oc, oc]
+pheatmap(Cmed, display_numbers = TRUE, number_format = "%.2f", fontsize_number = 10,
+         color = colorRampPalette(brewer.pal(9, "YlOrRd"))(100), breaks = seq(0, 1, length.out = 101),
+         cluster_rows = FALSE, cluster_cols = FALSE, na_col = "grey92", border_color = "white",
+         labels_row = paste0("C", niv[oc], " (n=", sapply(gr, length)[oc], ")"), main = "")
+```
+
+```{r composicao-texto, echo=FALSE}
+coesao <- diag(Cmed); fora <- Cmed[upper.tri(Cmed)]
+cl_energy <- lab_ref[match("original_firstorder_Energy", feat)]
+membros_energy <- nome(feat[lab_ref == cl_energy])
+```
+
+> A partição tem `r K_REF` clusters, dos quais `r sum(table(lab_ref) == 1)` são
+> unitários. A correlação média dentro dos clusters
+> (`r fmt(mean(coesao, na.rm = TRUE), 2)`) é bem maior que entre clusters
+> (`r fmt(mean(fora), 2)`), de modo que os grupos representam blocos de
+> informação distintos. Energy e TotalEnergy estão no cluster
+> C`r cl_energy`, junto com `r paste(setdiff(membros_energy, c("firstorder_Energy", "firstorder_TotalEnergy")), collapse = " e ")`.
+> Os descritores de forma que restaram (Elongation e Flatness) ficam isolados,
+> sem redundância com os demais.
+
+\
+
+# 10. Reprodutibilidade da estrutura
+
+A pergunta é se a partição descreve uma propriedade dos dados ou se é artefato
+das decisões usadas para construí-la. Perturbam-se separadamente os **dados**
+(pacientes) e o **método** (correlação, ligação e corte) e comparam-se os
+efeitos.
+
+## 10.1 Perturbação dos dados
+
+```{r reamostragem}
+set.seed(SEMENTE)
+reamostra <- function(frac, repor, B = B_BOOT) replicate(B, {
+  idx <- sample.int(n, size = round(n * frac), replace = repor)
+  ari(lab_ref, particao(X[idx, , drop = FALSE]))
+})
+a_boot  <- reamostra(1.00, TRUE)
+a_75    <- reamostra(0.75, FALSE)
+a_50    <- reamostra(0.50, FALSE)
+a_split <- replicate(B_BOOT, {
+  q <- sample.int(n)
+  ari(particao(X[q[1:floor(n / 2)], , drop = FALSE]),
+      particao(X[q[(floor(n / 2) + 1):n], , drop = FALSE]))
+})
+resumo_ari <- function(v) sprintf("%.3f [%.3f; %.3f]", mean(v), quantile(v, .025), quantile(v, .975))
+
+tab_ream <- data.frame(
+  Perturbação = c(sprintf("Bootstrap (n = %d, com reposição)", n), "Subamostra de 75 %",
+                  "Subamostra de 50 %", "Metades disjuntas (split-half)"),
+  `n efetivo` = c(n, round(.75 * n), round(.50 * n), floor(n / 2)),
+  `ARI médio [IC 95 %]` = c(resumo_ari(a_boot), resumo_ari(a_75), resumo_ari(a_50), resumo_ari(a_split)),
+  check.names = FALSE)
+
+kable(tab_ream, format = "html", align = c("l", "c", "c"),
+      caption = sprintf("Tabela 20. Reprodutibilidade da partição sob reamostragem de pacientes (%d repetições por cenário)", B_BOOT)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> O ARI vale 1 quando as duas partições são idênticas e fica perto de 0 quando
+> a concordância é a esperada ao acaso. No bootstrap, a partição reamostrada
+> concorda com a de referência com ARI médio de `r fmt(mean(a_boot))`. Nas metades
+> disjuntas, cada partição é estimada com apenas `r floor(n / 2)` pacientes, e
+> parte da queda (`r fmt(mean(a_split))`) reflete esse tamanho amostral menor.
+
+## 10.2 Perturbação do método
+
+Toda clusterização de variáveis depende de três decisões raramente relatadas:
+o coeficiente de correlação, o critério de ligação e o ponto de corte. A análise
+de multiverso (Steegen et al., 2016) executa todas as combinações defensáveis.
+Alterar o **corte** muda deliberadamente a granularidade; alterar a
+**correlação ou a ligação**, mantido o corte, deveria produzir descrições
+equivalentes do mesmo fenômeno.
+
+```{r multiverso}
+multiverso <- expand.grid(distancia = c("spearman", "pearson"),
+                          ligacao = c("average", "ward.D2", "complete"),
+                          corte = c(0.10, 0.20, 0.30), stringsAsFactors = FALSE)
+multiverso$k <- NA_integer_; multiverso$ARI <- NA_real_
+for (i in seq_len(nrow(multiverso))) {
+  l <- particao(X, multiverso$distancia[i], multiverso$ligacao[i], multiverso$corte[i])
+  multiverso$k[i] <- max(l); multiverso$ARI[i] <- ari(lab_ref, l)
+}
+multiverso$tipo <- ifelse(multiverso$corte == CORTE, "Método (corte fixo)", "Granularidade (corte alterado)")
+multiverso <- multiverso[order(-multiverso$ARI), ]
+
+multiverso %>%
+  transmute(Correlação = distancia, Ligação = ligacao, `Corte (d)` = corte,
+            `N.º de clusters` = k, ARI = round(ARI, 3), `Tipo de decisão` = tipo) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c", "c", "l"),
+        caption = "Tabela 21. Multiverso analítico: ARI de cada configuração contra a partição de referência") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE, font_size = 13)
+```
+
+```{r fig-multiverso, fig.width=8, fig.height=5, fig.cap="Figura 10. Perturbação dos dados (faixas: intervalos de 95 % do bootstrap e das metades disjuntas) e perturbação do método (pontos)."}
+faixas <- data.frame(
+  cenario = factor(c("Bootstrap", "Metades disjuntas"), levels = c("Bootstrap", "Metades disjuntas")),
+  lo = c(quantile(a_boot, .025), quantile(a_split, .025)),
+  hi = c(quantile(a_boot, .975), quantile(a_split, .975)),
+  md = c(mean(a_boot), mean(a_split)))
+ggplot() +
+  geom_rect(data = faixas, aes(xmin = lo, xmax = hi, ymin = -Inf, ymax = Inf, fill = cenario), alpha = .18) +
+  geom_vline(data = faixas, aes(xintercept = md, colour = cenario), linetype = 2, show.legend = FALSE) +
+  geom_point(data = subset(multiverso, ARI < 1),
+             aes(x = ARI, y = reorder(paste(distancia, ligacao, "| d =", corte), ARI), shape = tipo), size = 2.4) +
+  scale_fill_manual(values = c("Bootstrap" = "#1D9E75", "Metades disjuntas" = "#378ADD"), name = "Dados") +
+  scale_colour_manual(values = c("Bootstrap" = "#0F6E56", "Metades disjuntas" = "#185FA5")) +
+  scale_shape_manual(values = c(16, 1), name = "Método") +
+  labs(x = "ARI contra a partição de referência", y = NULL) +
+  theme_minimal(base_size = 11) + theme(legend.position = "bottom", legend.box = "vertical")
+```
+
+```{r multiverso-texto, echo=FALSE}
+mv_fixo <- subset(multiverso, corte == CORTE & ARI < 1)
+pior_fixo <- if (nrow(mv_fixo)) min(mv_fixo$ARI) else 1
+n_ident <- sum(multiverso$corte == CORTE & multiverso$ARI == 1)
+```
+
+> Mantido o corte em $d =$ `r fmt(CORTE, 2)`, `r n_ident` das 6 combinações de
+> correlação e ligação `r if (n_ident == 1) "reproduz" else "reproduzem"` exatamente
+> a partição de referência, e a maior divergência corresponde a um ARI de
+> `r fmt(pior_fixo)`, valor abaixo do ARI médio do bootstrap
+> (`r fmt(mean(a_boot))`) e dentro da faixa das metades disjuntas. Alterando
+> também o corte, o número de clusters varia de `r min(multiverso$k)` a
+> `r max(multiverso$k)`. A comparação entre esses valores e as faixas de
+> reamostragem mostra se as decisões do analista mudam a estrutura mais ou menos
+> do que a própria amostra de pacientes.
+
+## 10.3 Estabilidade de cada cluster (critério de Hennig)
+
+Em cada reamostragem bootstrap, refaz-se o agrupamento e, para cada cluster da
+referência, procura-se o cluster novo mais parecido, medindo a semelhança pelo
+Jaccard. A média sobre as reamostragens indica se o cluster se mantém
+(Hennig, 2007): acima de 0,75, estável; até 0,50, dissolvido.
+
+```{r hennig}
+set.seed(SEMENTE)
+cls  <- sort(unique(lab_ref))
+Jmat <- matrix(NA_real_, B_BOOT, length(cls))
+for (b in seq_len(B_BOOT)) {
+  grupos_b <- split(seq_len(p), particao(X[sample.int(n, n, replace = TRUE), , drop = FALSE]))
+  for (j in seq_along(cls))
+    Jmat[b, j] <- max(vapply(grupos_b, function(g) jaccard(which(lab_ref == cls[j]), g), numeric(1)))
+}
+hennig <- data.frame(
+  Cluster = paste0("C", cls),
+  Tamanho = as.integer(table(lab_ref)[as.character(cls)]),
+  `J bootstrap` = round(colMeans(Jmat), 3),
+  `IC 95 %` = sprintf("[%.2f; %.2f]", apply(Jmat, 2, quantile, .025), apply(Jmat, 2, quantile, .975)),
+  check.names = FALSE)
+hennig$Situação <- cut(hennig$`J bootstrap`, c(-Inf, .50, .75, Inf),
+                       labels = c("Dissolvido", "Intermediário", "Estável"))
+hennig <- hennig[order(-hennig$Tamanho), ]
+
+kable(hennig, format = "html", row.names = FALSE, align = c("l", rep("c", 4)),
+      caption = sprintf("Tabela 22. Estabilidade de cada cluster sob bootstrap (%d reamostragens)", B_BOOT)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> `r sum(hennig$Situação == "Estável")` clusters foram classificados como
+> estáveis, `r sum(hennig$Situação == "Intermediário")` como intermediários e
+> `r sum(hennig$Situação == "Dissolvido")` como dissolvidos. Em clusters de um
+> único descritor, o Jaccard é 1 apenas quando o descritor permanece sozinho na
+> partição reamostrada.
+
+## 10.4 A estrutura depende do diagnóstico ou do protocolo?
+
+Se a forma como os descritores se correlacionam fosse diferente entre pulmão e
+colorretal, ou entre exames com e sem contraste, não faria sentido usar uma
+única partição para todos os pacientes. Para cada fator, agrupam-se os
+descritores separadamente em cada grupo e comparam-se as duas partições pelo
+ARI. A referência é a distribuição do ARI quando os pacientes são divididos ao
+acaso em grupos de mesmo tamanho. O teste é unilateral, pois apenas uma
+concordância **menor** que a do acaso indicaria dependência.
+
+```{r controles}
+set.seed(SEMENTE)
+controle <- function(g) {
+  n1 <- sum(g)
+  obs <- ari(particao(X[g == 1, , drop = FALSE]), particao(X[g == 0, , drop = FALSE]))
+  nulo <- replicate(B_BOOT, {
+    q <- sample.int(n)
+    ari(particao(X[q[1:n1], , drop = FALSE]), particao(X[q[(n1 + 1):n], , drop = FALSE]))
+  })
+  list(obs = obs, nulo = nulo, n1 = n1, p = (1 + sum(nulo <= obs)) / (B_BOOT + 1))
+}
+c_dx <- controle(y); c_ct <- controle(ct)
+
+tab_ctrl <- data.frame(
+  Fator = c("Diagnóstico (pulmão vs. colorretal)", "Protocolo (com vs. sem contraste)"),
+  `Tamanho dos grupos` = c(sprintf("%d / %d", c_dx$n1, n - c_dx$n1), sprintf("%d / %d", c_ct$n1, n - c_ct$n1)),
+  `ARI observado` = round(c(c_dx$obs, c_ct$obs), 3),
+  `ARI nulo [IC 95 %]` = c(resumo_ari(c_dx$nulo), resumo_ari(c_ct$nulo)),
+  `p empírico (unilateral)` = round(c(c_dx$p, c_ct$p), 3),
+  check.names = FALSE)
+
+kable(tab_ctrl, format = "html", align = c("l", rep("c", 4)),
+      caption = sprintf("Tabela 23. Dependência da estrutura em relação ao diagnóstico e ao protocolo (%d divisões aleatórias)", B_BOOT)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r fig-controles, fig.width=8, fig.height=3.2, fig.cap="Figura 11. Distribuição do ARI em divisões aleatórias dos pacientes (histogramas) e valor observado em cada fator (linha vermelha)."}
+data.frame(valor = c(c_dx$nulo, c_ct$nulo),
+           fator = rep(c("Diagnóstico", "Protocolo"), each = B_BOOT)) %>%
+  ggplot(aes(valor)) +
+  geom_histogram(bins = 20, fill = "grey85", colour = "grey55", linewidth = .3) +
+  geom_vline(data = data.frame(fator = c("Diagnóstico", "Protocolo"), obs = c(c_dx$obs, c_ct$obs)),
+             aes(xintercept = obs), colour = "firebrick", linewidth = .9) +
+  facet_wrap(~ fator) +
+  labs(x = "ARI entre as partições dos dois grupos", y = "Frequência") +
+  theme_minimal(base_size = 11)
+```
+
+> Diagnóstico: ARI observado de `r fmt(c_dx$obs)`, contra média nula de
+> `r fmt(mean(c_dx$nulo))` (p = `r fmt(c_dx$p)`). Protocolo: ARI observado de
+> `r fmt(c_ct$obs)`, contra média nula de `r fmt(mean(c_ct$nulo))`
+> (p = `r fmt(c_ct$p)`). `r if (c_dx$p >= .05 && c_ct$p >= .05) "Em nenhum dos dois casos há evidência de que a estrutura dependa do fator, o que sustenta o uso de uma única partição para todos os pacientes." else "Há indício de dependência em pelo menos um dos fatores, o que deve ser considerado ao usar uma única partição para todos os pacientes."`
+
+\
+
+# 11. Clusters e frequência de seleção
+
+Esta seção liga o agrupamento à seleção da Seção 8. Para cada cluster,
+calcula-se a proporção dos `r nrow(rf$imp)` ajustes em que **ao menos um** de
+seus descritores esteve entre os $k =$ `r TOP_K` mais importantes. Como clusters
+grandes têm mais chances de serem atingidos, a tabela inclui a frequência
+esperada se os `r TOP_K` descritores fossem sorteados ao acaso:
+
+$$P(\text{cluster com } m \text{ descritores ser atingido}) = 1 - \binom{p - m}{k} \Big/ \binom{p}{k}.$$
+
+```{r freq-cluster}
+sel_k <- t(apply(rf$imp, 1, function(v) {
+  o <- order(v, decreasing = TRUE)[seq_len(TOP_K)]; o <- o[v[o] > 0]
+  seq_along(v) %in% o
+}))
+tab_fc <- data.frame(
+  Cluster = paste0("C", ordem),
+  Tamanho = as.integer(table(lab_ref)[as.character(ordem)]),
+  Descritores = sapply(ordem, function(cc) paste(nome(feat[lab_ref == cc]), collapse = ", ")),
+  `Frequência do cluster` = sapply(ordem, function(cc) mean(apply(sel_k[, lab_ref == cc, drop = FALSE], 1, any))),
+  `Esperado ao acaso` = sapply(ordem, function(cc) {
+    m <- sum(lab_ref == cc); 1 - choose(p - m, TOP_K) / choose(p, TOP_K) }),
+  `Maior frequência individual` = sapply(ordem, function(cc) max(colMeans(sel_k[, lab_ref == cc, drop = FALSE]))),
+  check.names = FALSE, row.names = NULL)
+tab_fc$`Diferença` <- tab_fc$`Frequência do cluster` - tab_fc$`Esperado ao acaso`
+
+tab_fc %>%
+  mutate(across(c(`Frequência do cluster`, `Esperado ao acaso`, `Maior frequência individual`), ~ pct(.x)),
+         `Diferença` = sprintf("%+.0f p.p.", 100 * `Diferença`)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "l", rep("c", 4)),
+        caption = sprintf("Tabela 24. Frequência de seleção por cluster (k = %d), comparada à esperada ao acaso", TOP_K)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), font_size = 13) %>%
+  column_spec(3, width = "35%")
+```
+
+```{r freq-cluster-texto, echo=FALSE}
+acima <- tab_fc[tab_fc$`Diferença` > 0.05, ]
+maior <- tab_fc[which.max(tab_fc$Tamanho), ]
+```
+
+> Um cluster grande aparece com frequência alta mesmo sem nenhuma preferência do
+> modelo: o maior cluster (`r maior$Cluster`, `r maior$Tamanho` descritores)
+> seria atingido ao acaso em `r pct(maior[["Esperado ao acaso"]])` dos ajustes,
+> e foi atingido em `r pct(maior[["Frequência do cluster"]])`. A comparação
+> relevante, portanto, é entre a frequência observada e a esperada.
+> `r if (nrow(acima)) paste0("Ficaram claramente acima do acaso: ", paste0(acima$Cluster, " (", pct(acima[["Frequência do cluster"]]), " contra ", pct(acima[["Esperado ao acaso"]]), ")", collapse = "; "), ".") else "Nenhum cluster ficou claramente acima do acaso."`
+> Essa linha de base será usada também na avaliação da estabilidade da seleção
+> nos níveis de descritor e de cluster.
+
+\
+
+# 12. Estabilidade da seleção: descritor e cluster
+
+## 12.1 Método
+
+A estabilidade da seleção mede se o modelo escolhe os mesmos descritores
+quando os dados mudam um pouco. Em cada um dos `r nrow(rf$imp)` ajustes do
+Random Forest da Seção 8, o conjunto selecionado é formado pelos $k$
+descritores de maior importância (com importância positiva). Os mesmos
+ajustes são lidos de duas maneiras:
+
+- **Nível de descritor:** compara-se quais descritores foram selecionados.
+- **Nível de cluster:** cada descritor selecionado é substituído pelo seu
+  cluster (Seção 9), e compara-se quais clusters foram representados.
+
+Nada no modelo muda; muda apenas a unidade em que a seleção é lida. Se parte
+da instabilidade for troca entre descritores redundantes, a seleção será mais
+consistente no nível de cluster.
+
+Duas medidas são usadas. O **índice de Jaccard** compara dois conjuntos
+(elementos em comum divididos pelo total de elementos distintos); em cada
+semente, calcula-se a média do Jaccard entre os `r N_FOLDS` ajustes, e as
+`r N_SEEDS` sementes funcionam como réplicas pareadas. O **índice $\Phi$ de
+Nogueira** resume a estabilidade dos `r nrow(rf$imp)` ajustes de uma vez, a
+partir da variância das indicadoras de seleção de cada descritor (Nogueira,
+Sechidis e Brown, 2018):
+
+$$\hat{\Phi} = 1 - \frac{\frac{1}{p}\sum_{f=1}^{p} s_f^2}{\frac{\bar{k}}{p}\left(1 - \frac{\bar{k}}{p}\right)}.$$
+
+Ambos valem 1 quando todos os ajustes selecionam o mesmo conjunto.
+
+```{r funcoes-estabilidade}
+# Indicadoras de seleção: 1 = entre os k mais importantes (com importância positiva)
+bin_variaveis <- function(imp, k) {
+  t(apply(imp, 1, function(v) {
+    o <- order(v, decreasing = TRUE)[seq_len(min(k, length(v)))]; o <- o[v[o] > 0]
+    as.numeric(seq_along(v) %in% o)
+  }))
+}
+# 1 = cluster representado entre os k descritores selecionados
+bin_clusters <- function(imp, k, mapa = lab_ref) {
+  niv <- sort(unique(mapa)); Zv <- bin_variaveis(imp, k)
+  t(apply(Zv, 1, function(r) as.numeric(niv %in% unique(mapa[r == 1]))))
+}
+# Média do Jaccard entre todos os pares de linhas
+jaccard_medio_bin <- function(Z) {
+  I <- Z %*% t(Z); tam <- rowSums(Z); U <- outer(tam, tam, "+") - I
+  J <- ifelse(U > 0, I / pmax(U, 1), 1); mean(J[upper.tri(J)])
+}
+# Phi de Nogueira para M conjuntos
+phi_nogueira <- function(Z) {
+  pz <- ncol(Z); kb <- mean(rowSums(Z))
+  if (kb == 0 || kb == pz) return(NA_real_)
+  1 - mean(apply(Z, 2, var)) / ((kb / pz) * (1 - kb / pz))
+}
+# Jaccard médio calculado dentro de cada semente
+por_semente <- function(Z, seed_fit)
+  sapply(sort(unique(seed_fit)), function(s) jaccard_medio_bin(Z[seed_fit == s, , drop = FALSE]))
+```
+
+## 12.2 Estabilidade observada
+
+```{r estabilidade-k}
+tab_k <- do.call(rbind, lapply(K_GRID, function(k) {
+  Zv <- bin_variaveis(rf$imp, k); Zc <- bin_clusters(rf$imp, k)
+  jv <- por_semente(Zv, rf$seed_fit); jc <- por_semente(Zc, rf$seed_fit)
+  ic <- ic_t(jc - jv)
+  wx <- tryCatch(suppressWarnings(wilcox.test(jc, jv, paired = TRUE)$p.value), error = function(e) NA_real_)
+  data.frame(k = k, `J descritor` = mean(jv), `J cluster` = mean(jc), Ganho = mean(jc - jv),
+             `IC 95 % do ganho` = sprintf("[%.3f; %.3f]", ic[1], ic[2]), `p (Wilcoxon)` = wx,
+             `Phi descritor` = phi_nogueira(Zv), `Phi cluster` = phi_nogueira(Zc), check.names = FALSE)
+}))
+
+tab_k %>%
+  mutate(across(c(`J descritor`, `J cluster`, Ganho, `Phi descritor`, `Phi cluster`), ~ round(.x, 3)),
+         `p (Wilcoxon)` = format.pval(`p (Wilcoxon)`, digits = 2, eps = .001)) %>%
+  kable(format = "html", row.names = FALSE, align = "c",
+        caption = sprintf("Tabela 25. Estabilidade da seleção por tamanho do conjunto (%d sementes como réplicas pareadas)", N_SEEDS)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r estab-texto, echo=FALSE}
+lk <- tab_k[tab_k$k == TOP_K, ]
+```
+
+> Em $k =$ `r TOP_K`, o Jaccard passa de `r fmt(lk[["J descritor"]])` no nível
+> de descritor para `r fmt(lk[["J cluster"]])` no nível de cluster, e o
+> $\Phi$, de `r fmt(lk[["Phi descritor"]])` para `r fmt(lk[["Phi cluster"]])`.
+> Lida por cluster, a seleção parece mais consistente. O p-valor do Wilcoxon
+> indica apenas que o sinal do ganho se repete entre as sementes; com
+> `r N_SEEDS` pares na mesma direção, o menor valor possível é
+> `r fmt(2 / 2^N_SEEDS)`.
+
+## 12.3 Comparação com o acaso
+
+Com poucos clusters, e um deles com metade dos descritores, até seleções
+sorteadas ao acaso coincidem bastante no nível de cluster. Por isso, cada
+índice é comparado ao valor esperado se os $k$ descritores fossem sorteados
+uniformemente, com os tamanhos reais dos clusters. O valor ajustado,
+
+$$\text{ajustado} = \frac{\text{observado} - \text{acaso}}{1 - \text{acaso}},$$
+
+indica que fração da distância entre o acaso e a concordância perfeita é
+percorrida pela seleção observada.
+
+```{r acaso, cache=TRUE, cache.extra=list(lab_ref, K_GRID, B_ACASO, B_ACASO_PHI, N_SEEDS, N_FOLDS)}
+sorteia_Z <- function(k, mapa, M) {
+  pt <- length(mapa); niv <- sort(unique(mapa))
+  Zv <- matrix(0, M, pt); Zc <- matrix(0, M, length(niv))
+  for (m in seq_len(M)) {
+    s <- sample.int(pt, min(k, pt)); Zv[m, s] <- 1
+    Zc[m, match(unique(mapa[s]), niv)] <- 1
+  }
+  list(v = Zv, c = Zc)
+}
+set.seed(SEMENTE)
+acaso <- t(sapply(K_GRID, function(k) {
+  jj <- replicate(B_ACASO, { z <- sorteia_Z(k, lab_ref, N_FOLDS)
+                             c(jaccard_medio_bin(z$v), jaccard_medio_bin(z$c)) })
+  pp <- replicate(B_ACASO_PHI, { z <- sorteia_Z(k, lab_ref, N_SEEDS * N_FOLDS)
+                                 c(phi_nogueira(z$v), phi_nogueira(z$c)) })
+  c(Jv = mean(jj[1, ]), Jc = mean(jj[2, ]), Pv = mean(pp[1, ], na.rm = TRUE), Pc = mean(pp[2, ], na.rm = TRUE))
+}))
+```
+
+```{r acaso-tab}
+ajusta <- function(obs, ac) (obs - ac) / (1 - ac)
+tab_acaso <- data.frame(
+  k = K_GRID,
+  `J descritor (acaso)` = acaso[, "Jv"], `J cluster (acaso)` = acaso[, "Jc"],
+  `J descritor ajustado` = ajusta(tab_k$`J descritor`, acaso[, "Jv"]),
+  `J cluster ajustado` = ajusta(tab_k$`J cluster`, acaso[, "Jc"]),
+  `Phi cluster (acaso)` = acaso[, "Pc"],
+  `Phi descritor ajustado` = ajusta(tab_k$`Phi descritor`, acaso[, "Pv"]),
+  `Phi cluster ajustado` = ajusta(tab_k$`Phi cluster`, acaso[, "Pc"]),
+  check.names = FALSE)
+
+tab_acaso %>%
+  mutate(across(-k, ~ round(.x, 3))) %>%
+  kable(format = "html", row.names = FALSE, align = "c",
+        caption = sprintf("Tabela 26. Linha de base do acaso e índices ajustados (%d sorteios para o Jaccard e %d para o Phi)", B_ACASO, B_ACASO_PHI)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r fig-acaso, fig.width=8, fig.height=4.5, fig.cap="Figura 12. Jaccard observado (linhas cheias) e esperado ao acaso (linhas tracejadas), nos níveis de descritor e de cluster."}
+rbind(data.frame(k = K_GRID, valor = tab_k$`J descritor`, nivel = "Descritor", tipo = "Observado"),
+      data.frame(k = K_GRID, valor = tab_k$`J cluster`,   nivel = "Cluster",   tipo = "Observado"),
+      data.frame(k = K_GRID, valor = acaso[, "Jv"],       nivel = "Descritor", tipo = "Acaso"),
+      data.frame(k = K_GRID, valor = acaso[, "Jc"],       nivel = "Cluster",   tipo = "Acaso")) %>%
+  ggplot(aes(k, valor, colour = nivel, linetype = tipo)) +
+  geom_line(linewidth = .8) + geom_point(size = 2.4) +
+  scale_colour_manual(values = c("Cluster" = "#1D9E75", "Descritor" = "#D85A30"), name = "Nível") +
+  scale_linetype_manual(values = c("Observado" = 1, "Acaso" = 2), name = NULL) +
+  scale_x_continuous(breaks = K_GRID) + ylim(0, 1) +
+  labs(x = "k (tamanho do conjunto selecionado)", y = "Índice de Jaccard") +
+  theme_minimal(base_size = 12) + theme(legend.position = "bottom")
+```
+
+```{r acaso-texto, echo=FALSE}
+la <- tab_acaso[tab_acaso$k == TOP_K, ]
+```
+
+> Em $k =$ `r TOP_K`, o Jaccard esperado ao acaso é de
+> `r fmt(la[["J descritor (acaso)"]])` no nível de descritor e de
+> `r fmt(la[["J cluster (acaso)"]])` no nível de cluster. Descontado o acaso de
+> cada nível, o Jaccard ajustado é de `r fmt(la[["J descritor ajustado"]])`
+> para os descritores e de `r fmt(la[["J cluster ajustado"]])` para os
+> clusters; o $\Phi$ ajustado, de `r fmt(la[["Phi descritor ajustado"]])` e
+> `r fmt(la[["Phi cluster ajustado"]])`. `r if (la[["J cluster ajustado"]] <= la[["J descritor ajustado"]]) "Portanto, o aumento aparente de estabilidade no nível de cluster desaparece quando se desconta o acaso: ele decorre de a unidade cluster ser mais grosseira, e não de uma seleção mais consistente." else "Mesmo descontado o acaso, a seleção permanece mais consistente no nível de cluster."`
+
+## 12.4 Teste de aleatorização do rótulo
+
+O teste verifica se a estabilidade observada depende da relação entre os
+descritores e o diagnóstico. Os diagnósticos são embaralhados entre os
+pacientes, o que destrói essa relação mas preserva a correlação entre os
+descritores, e a análise é repetida `r B_PERM` vezes. Para tornar o
+procedimento viável, cada repetição usa `r N_SEEDS_PERM` sementes e o `mtry`
+fixo no valor mais escolhido na Seção 8; o cenário observado de referência é
+recalculado com a mesma configuração, de modo que observado e nulo são
+diretamente comparáveis.
+
+```{r permutacao, cache=TRUE, cache.extra=list(X, y, ct, lab_ref, B_PERM, N_SEEDS_PERM, TOP_K, NTREE)}
+MTRY_MODAL <- as.integer(names(sort(table(rf$mtry), decreasing = TRUE))[1])
+
+roda_rf_fixo <- function(yy, estratos, seeds = N_SEEDS_PERM, mt = MTRY_MODAL) {
+  imp <- matrix(NA_real_, seeds * N_FOLDS, p); seed_fit <- integer(seeds * N_FOLDS)
+  oof <- matrix(NA_real_, seeds, n); linha <- 0
+  for (s in seq_len(seeds)) {
+    set.seed(1000 + s)
+    for (te in caret::createFolds(estratos, k = N_FOLDS, list = TRUE)) {
+      linha <- linha + 1; seed_fit[linha] <- s; tr <- setdiff(seq_len(n), te)
+      set.seed(3000 + linha)
+      m <- randomForest(X[tr, ], factor(yy[tr]), ntree = NTREE, mtry = mt, importance = TRUE)
+      imp[linha, ] <- importance(m, type = 1)[, 1]
+      oof[s, te] <- predict(m, X[te, ], type = "prob")[, "1"]
+    }
+  }
+  list(imp = imp, seed_fit = seed_fit,
+       auc = mean(apply(oof, 1, function(pp)
+         as.numeric(auc(roc(yy, pp, direction = "<", levels = c(0, 1), quiet = TRUE))))))
+}
+estatisticas <- function(r) {
+  jv <- mean(por_semente(bin_variaveis(r$imp, TOP_K), r$seed_fit))
+  jc <- mean(por_semente(bin_clusters(r$imp, TOP_K), r$seed_fit))
+  c(AUC = r$auc, Jv = jv, Jc = jc, Ganho = jc - jv)
+}
+
+obs_vec  <- estatisticas(roda_rf_fixo(y, estrato))
+perm_mat <- t(sapply(seq_len(B_PERM), function(b) {
+  set.seed(5000 + b); yp <- sample(y)
+  estatisticas(roda_rf_fixo(yp, factor(paste0(yp, "_", ct))))
+}))
+```
+
+```{r permutacao-tab}
+p_perm <- sapply(names(obs_vec), function(nm) (1 + sum(perm_mat[, nm] >= obs_vec[nm])) / (B_PERM + 1))
+tab_perm <- data.frame(
+  Estatística = c("AUC (out-of-fold)", "J descritor", "J cluster", "Ganho (cluster menos descritor)"),
+  Observado = round(unname(obs_vec), 3),
+  `Nulo (média)` = round(unname(colMeans(perm_mat)), 3),
+  `Nulo (IC 95 %)` = sprintf("[%.3f; %.3f]", apply(perm_mat, 2, quantile, .025), apply(perm_mat, 2, quantile, .975)),
+  Excesso = round(unname(obs_vec - colMeans(perm_mat)), 3),
+  `p empírico` = format.pval(unname(p_perm), digits = 2, eps = 1 / (B_PERM + 1)),
+  check.names = FALSE, row.names = NULL)
+
+kable(tab_perm, format = "html", row.names = FALSE, align = c("l", rep("c", 5)),
+      caption = sprintf("Tabela 27. Teste de aleatorização do rótulo (%d permutações; %d sementes; mtry = %d; k = %d)",
+                        B_PERM, N_SEEDS_PERM, MTRY_MODAL, TOP_K)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r fig-permutacao, fig.width=10, fig.height=3.3, fig.cap="Figura 13. Distribuição nula de cada estatística sob permutação do diagnóstico (histogramas) e valor observado (linha vermelha)."}
+rot <- c("AUC", "J descritor", "J cluster", "Ganho")
+data.frame(valor = as.vector(perm_mat), est = factor(rep(rot, each = B_PERM), levels = rot)) %>%
+  ggplot(aes(valor)) +
+  geom_histogram(bins = 16, fill = "grey85", colour = "grey55", linewidth = .3) +
+  geom_vline(data = data.frame(est = factor(rot, levels = rot), obs = unname(obs_vec)),
+             aes(xintercept = obs), colour = "firebrick", linewidth = .9) +
+  facet_wrap(~ est, scales = "free", nrow = 1) +
+  labs(x = NULL, y = "Frequência") + theme_minimal(base_size = 10)
+```
+
+```{r permutacao-texto, echo=FALSE}
+pv <- setNames(p_perm, names(obs_vec))
+```
+
+> A AUC observada (`r fmt(obs_vec["AUC"])`) supera a distribuição nula
+> (média `r fmt(mean(perm_mat[, "AUC"]))`, p = `r fmt(pv["AUC"])`): o modelo
+> tem sinal real. No nível de descritor, o Jaccard observado é de
+> `r fmt(obs_vec["Jv"])`, contra `r fmt(mean(perm_mat[, "Jv"]))` sob o nulo
+> (p = `r fmt(pv["Jv"])`); no nível de cluster, `r fmt(obs_vec["Jc"])` contra
+> `r fmt(mean(perm_mat[, "Jc"]))` (p = `r fmt(pv["Jc"])`). O ganho de ler a
+> seleção por cluster é de `r fmt(obs_vec["Ganho"])`, contra
+> `r fmt(mean(perm_mat[, "Ganho"]))` com diagnósticos embaralhados
+> (p = `r fmt(pv["Ganho"])`). `r if (pv["Ganho"] >= .05) "O ganho não difere do que se obtém sem nenhuma relação com o diagnóstico: ele decorre da redundância entre os descritores e do pequeno número de clusters, e não do sinal da doença." else "O ganho é maior do que o obtido com diagnósticos embaralhados, o que indica que parte dele depende do sinal da doença."`
+
+\
+
+# 13. Comparação: modelo base e modelos radiômicos
+
+## 13.1 Modelos comparados
+
+Todos os modelos são avaliados nas mesmas `r N_SEEDS` repetições e nas mesmas
+partições da validação cruzada, de modo que cada semente produz uma AUC para
+cada modelo nos mesmos pacientes.
+
+1. **Modelo base:** regressão logística com a esfericidade (Seção 5).
+2. **Random Forest:** os `r p` descritores lapidados (Seção 8).
+3. **Modelo de clusters:** regressão logística com um representante de cada
+   cluster da Seção 9, o medoide, isto é, o descritor mais próximo dos demais
+   do seu grupo. Cada cluster contribui com uma variável, o que mantém o modelo
+   interpretável.
+4. **Modelo base mais clusters:** a esfericidade junto com os medoides. A
+   comparação com o modelo base indica se a radiômica lapidada acrescenta
+   informação à medida de irregularidade da borda.
+
+Descritores estritamente positivos e muito assimétricos (assimetria acima de 1)
+entram em escala logarítmica.
+
+```{r medoides}
+Dm_ref  <- as.matrix(dist_ref(X))
+med_idx <- sapply(sort(unique(lab_ref)), function(cc) {
+  idx <- which(lab_ref == cc)
+  if (length(idx) == 1) idx else idx[which.min(rowMeans(Dm_ref[idx, idx, drop = FALSE]))]
+})
+assimetria <- function(v) mean((v - mean(v))^3) / sd(v)^3
+transforma <- function(v) if (all(v > 0) && abs(assimetria(v)) > 1) log(v) else v
+
+Z_clu <- as.data.frame(lapply(med_idx, function(j) transforma(X[, j])))
+names(Z_clu) <- make.names(nome(feat[med_idx]))
+
+data.frame(Cluster = paste0("C", sort(unique(lab_ref))),
+           Medoide = nome(feat[med_idx]),
+           `Escala no modelo` = sapply(med_idx, function(j)
+             if (all(X[, j] > 0) && abs(assimetria(X[, j])) > 1) "logaritmo" else "original"),
+           check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c"),
+        caption = "Tabela 28. Representante (medoide) de cada cluster") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+## 13.2 Desempenho
+
+```{r comparacao, cache=TRUE, cache.extra=list(X, y, estrato, lab_ref, esf_base, N_SEEDS, N_FOLDS)}
+auc_clu    <- cv_logit(Z_clu)
+auc_base_c <- cv_logit(cbind(esfericidade = esf_base, Z_clu))
+
+modelos <- list(
+  "Modelo base: esfericidade (logística)"          = auc_base,
+  "Random Forest: 18 descritores lapidados"        = rf$auc_semente,
+  "Modelo de clusters: 6 medoides (logística)"     = auc_clu,
+  "Modelo base + clusters (logística)"             = auc_base_c)
+
+tab_comp_mod <- do.call(rbind, lapply(names(modelos), function(nm) {
+  a <- modelos[[nm]]; d <- a - auc_base; ic <- ic_t(d)
+  data.frame(Modelo = nm, Variáveis = c(1, p, length(med_idx), length(med_idx) + 1)[match(nm, names(modelos))],
+             `AUC média` = round(mean(a), 3), `Desvio padrão` = round(sd(a), 3),
+             `Diferença para o modelo base [IC 95 %]` =
+               if (identical(a, auc_base)) "" else sprintf("%+.3f [%+.3f; %+.3f]", mean(d), ic[1], ic[2]),
+             `Sementes em que supera o base` =
+               if (identical(a, auc_base)) "" else sprintf("%d de %d", sum(d > 0), N_SEEDS),
+             check.names = FALSE)
+}))
+
+kable(tab_comp_mod, format = "html", row.names = FALSE, align = c("l", rep("c", 5)),
+      caption = sprintf("Tabela 29. Comparação dos modelos (AUC out-of-fold por semente, %d sementes, mesmas partições)", N_SEEDS)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  row_spec(1, bold = TRUE)
+```
+
+```{r fig-comparacao, fig.width=8.5, fig.height=4.8, fig.cap="Figura 14. AUC de cada semente nos quatro modelos. As linhas ligam as AUCs obtidas na mesma semente, isto é, nas mesmas partições. A linha vermelha marca o acaso."}
+niv_m <- c("Modelo base\n(esfericidade)", "Random Forest\n(18 lapidados)",
+           "Modelo de clusters\n(6 medoides)", "Base + clusters")
+data.frame(semente = rep(seq_len(N_SEEDS), 4),
+           auc = c(auc_base, rf$auc_semente, auc_clu, auc_base_c),
+           modelo = factor(rep(niv_m, each = N_SEEDS), levels = niv_m)) %>%
+  ggplot(aes(modelo, auc, group = semente)) +
+  geom_line(colour = "grey78") + geom_point(size = 2.2, colour = "grey25") +
+  geom_hline(yintercept = .5, linetype = 2, colour = "firebrick") +
+  labs(x = NULL, y = "AUC (out-of-fold, por semente)") +
+  theme_minimal(base_size = 11)
+```
+
+## 13.3 O que cada cluster acrescenta ao modelo base
+
+Para identificar qual informação radiômica, se alguma, complementa a
+irregularidade da borda, cada medoide é acrescentado isoladamente ao modelo
+base.
+
+```{r incremento, cache=TRUE, cache.extra=list(X, y, estrato, lab_ref, esf_base, N_SEEDS, N_FOLDS)}
+cl_ord <- sort(unique(lab_ref))
+tab_inc <- do.call(rbind, lapply(seq_along(med_idx), function(i) {
+  a  <- cv_logit(data.frame(esfericidade = esf_base, z = Z_clu[[i]]))
+  dd <- a - auc_base; ic <- ic_t(dd)
+  data.frame(Cluster = paste0("C", cl_ord[i]),
+             `Informação` = nome(feat[med_idx[i]]),
+             `AUC base + cluster` = round(mean(a), 3),
+             `Ganho sobre o base [IC 95 %]` = sprintf("%+.3f [%+.3f; %+.3f]", mean(dd), ic[1], ic[2]),
+             `Sementes com ganho` = sprintf("%d de %d", sum(dd > 0), N_SEEDS),
+             ganho = mean(dd), lo = ic[1], check.names = FALSE)
+}))
+tab_inc <- tab_inc[order(-tab_inc$ganho), ]
+
+kable(tab_inc[, 1:5], format = "html", row.names = FALSE, align = c("l", "l", "c", "c", "c"),
+      caption = sprintf("Tabela 30. Ganho de AUC ao acrescentar cada cluster ao modelo base (AUC do modelo base: %.3f)", mean(auc_base))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r comparacao-texto, echo=FALSE}
+melhor_inc <- tab_inc[1, ]
+inc_sig    <- tab_inc[round(tab_inc$lo, 3) > 0, ]
+sinal      <- function(x) sub(".", ",", sprintf("%+.3f", x), fixed = TRUE)
+d_rf  <- rf$auc_semente - auc_base
+d_bc  <- auc_base_c - auc_base
+```
+
+> **Modelo base contra os modelos radiômicos.** A regressão logística com uma
+> única medida de irregularidade da borda (AUC `r fmt(mean(auc_base))`)
+> `r if (mean(d_rf) < 0) "supera" else "fica abaixo de"` o Random Forest com os
+> `r p` descritores lapidados (`r fmt(mean(rf$auc_semente))`), em
+> `r sum(d_rf < 0)` das `r N_SEEDS` sementes. O modelo com um representante de
+> cada cluster alcança `r fmt(mean(auc_clu))`.
+>
+> **Valor incremental.** Acrescentar os `r length(med_idx)` medoides ao modelo
+> base leva a AUC a `r fmt(mean(auc_base_c))`, uma diferença de
+> `r sinal(mean(d_bc))` em relação ao modelo base. Isoladamente, o
+> cluster que mais acrescenta é o `r melhor_inc$Cluster`
+> (`r melhor_inc[["Informação"]]`), com ganho médio de
+> `r sinal(melhor_inc$ganho)`.
+> `r if (nrow(inc_sig) > 0) paste0("O intervalo de confiança do ganho fica inteiramente acima de zero para: ", paste(inc_sig$Cluster, collapse = ", "), ".") else "Para nenhum cluster o intervalo de confiança do ganho fica inteiramente acima de zero."`
+>
+> Ou seja, juntar todos os clusters piora o modelo, provavelmente por
+> sobreajuste, mas alguns clusters isolados trazem um ganho pequeno e
+> consistente sobre a irregularidade da borda.
+>
+> **Cuidados.** Os intervalos refletem a variação entre partições dos mesmos
+> `r n` pacientes, e não a incerteza amostral. O modelo base mais clusters tem
+> `r length(med_idx) + 1` preditores para cerca de `r round(sum(y == 0) * (N_FOLDS - 1) / N_FOLDS)`
+> pacientes colorretais em cada treino, o que favorece o sobreajuste.
+
+\
+
+# 14. Exportação
+
+```{r exporta}
+dir.create("resultados_analise", showWarnings = FALSE)
+write.csv(efeito,   "resultados_analise/efeito_contraste_105.csv", row.names = FALSE)
+write.csv(data.frame(descritor = feat, familia = familia),
+          "resultados_analise/descritores_lapidados.csv", row.names = FALSE)
+write.csv(tab_auc,  "resultados_analise/auc_rf_lapidado.csv", row.names = FALSE)
+write.csv(tab_freq, "resultados_analise/frequencia_selecao.csv", row.names = FALSE)
+write.csv(comp,     "resultados_analise/composicao_clusters.csv", row.names = FALSE)
+write.csv(tab_ream, "resultados_analise/reprodutibilidade_reamostragem.csv", row.names = FALSE)
+write.csv(multiverso, "resultados_analise/multiverso.csv", row.names = FALSE)
+write.csv(hennig,   "resultados_analise/hennig.csv", row.names = FALSE)
+write.csv(tab_ctrl, "resultados_analise/controles_negativos.csv", row.names = FALSE)
+write.csv(tab_fc,   "resultados_analise/frequencia_por_cluster.csv", row.names = FALSE)
+write.csv(data.frame(id = if ("id_table" %in% names(dados)) dados$id_table else seq_len(n),
+                     diagnostico = y, esfericidade = esf_base),
+          "resultados_analise/esfericidade.csv", row.names = FALSE)
+write.csv(tab_logit,    "resultados_analise/modelo_base_logistica.csv", row.names = FALSE)
+write.csv(tab_comp_mod, "resultados_analise/comparacao_modelos.csv", row.names = FALSE)
+write.csv(tab_k,     "resultados_analise/estabilidade_k.csv", row.names = FALSE)
+write.csv(tab_acaso, "resultados_analise/estabilidade_acaso.csv", row.names = FALSE)
+write.csv(tab_perm,  "resultados_analise/teste_permutacao.csv", row.names = FALSE)
+write.csv(tab_inc[, 1:5], "resultados_analise/incremento_por_cluster.csv", row.names = FALSE)
+saveRDS(list(rf = rf, efeito = efeito, keep = keep, feat = feat, lab_ref = lab_ref,
+             esfericidade = esf_base, auc_base = auc_base, auc_clu = auc_clu, auc_base_c = auc_base_c),
+        "resultados_analise/objetos_selecao.rds")
+```
+
+\
+
+# Referências
+
+- Akinci D'Antonoli, T., et al. (2024). Towards reproducible radiomics research:
+  introduction of a database for radiomics studies. *European Radiology*, 34(1),
+  436-443.
+- Anderson, M. J. (2001). A new method for non-parametric multivariate analysis
+  of variance. *Austral Ecology*, 26(1), 32-46.
+- Apicella, A., Isgrò, F., & Prevete, R. (2025). Don't push the button!
+  Exploring data leakage risks in machine learning and transfer learning.
+  *Artificial Intelligence Review*, 58, 339.
+- Breiman, L. (2001). Random forests. *Machine Learning*, 45(1), 5-32.
+- Castaldo, R., Pane, K., Nicolai, E., Franzese, M., & Salvatore, M. (2020). The
+  impact of normalization approaches to automatically detect radiogenomic
+  phenotypes characterizing breast cancer receptors status. *Cancers*, 12(2), 518.
+- Cliff, N. (1993). Dominance statistics: ordinal analyses to answer ordinal
+  questions. *Psychological Bulletin*, 114(3), 494-509.
+- Demircioglu, A. (2021). Measuring the bias of incorrect application of feature
+  selection when using cross-validation in radiomics. *Insights into Imaging*,
+  12(1), 172.
+- Demircioglu, A. (2024). The effect of feature normalization methods in
+  radiomics. *Insights into Imaging*, 15(1), 2.
+- Gillies, R. J., Kinahan, P. E., & Hricak, H. (2016). Radiomics: images are more
+  than pictures, they are data. *Radiology*, 278(2), 563-577.
+- Hastie, T., Tibshirani, R., & Friedman, J. (2009). *The Elements of Statistical
+  Learning* (2nd ed.). Springer.
+- Hennig, C. (2007). Cluster-wise assessment of cluster stability.
+  *Computational Statistics & Data Analysis*, 52(1), 258-271.
+- Hubert, L., & Arabie, P. (1985). Comparing partitions. *Journal of
+  Classification*, 2, 193-218.
+- Khaire, U. M., & Dhanalakshmi, R. (2019). Stability of feature selection
+  algorithm: a review. *Journal of King Saud University - Computer and
+  Information Sciences*.
+- Lambin, P., et al. (2012). Radiomics: extracting more information from medical
+  images using advanced feature analysis. *European Journal of Cancer*, 48(4),
+  441-446.
+- Lambin, P., et al. (2017). Radiomics: the bridge between medical imaging and
+  personalized medicine. *Nature Reviews Clinical Oncology*, 14(12), 749-762.
+- Lee, J. E., Jeong, W. G., & Kim, Y.-H. (2021). Differentiation of primary
+  lung cancer from solitary lung metastasis in patients with colorectal
+  cancer: a retrospective cohort study. *World Journal of Surgical Oncology*,
+  19, 28.
+- Limkin, E. J., Reuzé, S., Carré, A., Sun, R., Schernberg, A., Alexis, A.,
+  Deutsch, E., Ferté, C., & Robert, C. (2019). The complexity of tumor shape,
+  spiculatedness, correlates with tumor radiomic shape features. *Scientific
+  Reports*, 9, 4329.
+- Liu, Z., et al. (2019). The applications of radiomics in precision diagnosis
+  and treatment of oncology. *Theranostics*, 9(5), 1303-1322.
+- Lorensen, W. E., & Cline, H. E. (1987). Marching cubes: a high resolution 3D
+  surface construction algorithm. *ACM SIGGRAPH Computer Graphics*, 21(4),
+  163-169.
+- McWilliams, A., Tammemagi, M. C., Mayo, J. R., Roberts, H., Liu, G.,
+  Soghrati, K., et al. (2013). Probability of cancer in pulmonary nodules
+  detected on first screening CT. *New England Journal of Medicine*, 369(10),
+  910-919.
+- Nogueira, S., Sechidis, K., & Brown, G. (2018). On the stability of feature
+  selection algorithms. *Journal of Machine Learning Research*, 18(174), 1-54.
+- Noortman, W. A., et al. (2025). Multicollinearity and redundancy of the PET
+  radiomic feature set. *European Radiology*, 35(11), 6905-6916.
+- Orlhac, F., et al. (2022). A guide to ComBat harmonization of imaging
+  biomarkers in multicenter studies. *Journal of Nuclear Medicine*, 63(2),
+  172-179.
+- Park, J. E., Park, S. Y., Kim, H. J., & Kim, H. S. (2019). Reproducibility and
+  generalizability in radiomics modeling. *Korean Journal of Radiology*, 20(7),
+  1124-1137.
+- Park, J. E., et al. (2020). Quality of science and reporting of radiomics in
+  oncologic studies. *European Radiology*, 30(1), 523-536.
+- Peitz, L. B. (2025). *Estabilidade e reprodutibilidade em radiômica de câncer
+  de mama: uma análise estatística da seleção de variáveis*. Trabalho de
+  Conclusão de Curso, Departamento de Estatística, UFRGS.
+- Perniciano, A., Loddo, A., Di Ruberto, C., & Pes, B. (2025). Insights into
+  radiomics: impact of feature selection and classification. *Multimedia Tools
+  and Applications*, 84, 31695-31721.
+- Phipson, B., & Smyth, G. K. (2010). Permutation p-values should never be
+  zero: calculating exact p-values when permutations are randomly drawn.
+  *Statistical Applications in Genetics and Molecular Biology*, 9(1), Article 39.
+- Rizzo, S., et al. (2018). Radiomics: the facts and the challenges of image
+  analysis. *European Radiology Experimental*, 2(1), 36.
+- Romano, J., Kromrey, J. D., Coraggio, J., & Skowronek, J. (2006). Appropriate
+  statistics for ordinal level data: should we really be using t-test and
+  Cohen's d for evaluating group differences on the NSSE and other surveys?
+  *Annual Meeting of the Florida Association of Institutional Research*.
+- Scapicchio, C., et al. (2021). A deep look into radiomics.
+  *La Radiologia Medica*, 126(10), 1296-1311.
+- Sechidis, K., Papangelou, K., Nogueira, S., Weatherall, J., & Brown, G. (2020).
+  On the stability of feature selection in the presence of feature correlations.
+  *ECML PKDD 2019*, LNCS 11906, 327-342.
+- Snoeckx, A., Reyntiens, P., Desbuquoit, D., Spinhoven, M. J., Van Schil,
+  P. E., van Meerbeeck, J. P., et al. (2018). Evaluation of the solitary
+  pulmonary nodule: size matters, but do not ignore the power of morphology.
+  *Insights into Imaging*, 9(1), 73-86.
+- Steegen, S., Tuerlinckx, F., Gelman, A., & Vanpaemel, W. (2016). Increasing
+  transparency through a multiverse analysis. *Perspectives on Psychological
+  Science*, 11(5), 702-712.
+- Street, W. N., Wolberg, W. H., & Mangasarian, O. L. (1993). Nuclear feature
+  extraction for breast tumor diagnosis. *Proceedings of SPIE, Biomedical
+  Image Processing and Biomedical Visualization*, 1905, 861-870.
+- Strobl, C., Boulesteix, A.-L., Zeileis, A., & Hothorn, T. (2007). Bias in
+  random forest variable importance measures: illustrations, sources and a
+  solution. *BMC Bioinformatics*, 8, 25.
+- Swensen, S. J., Silverstein, M. D., Ilstrup, D. M., Schleck, C. D., & Edell,
+  E. S. (1997). The probability of malignancy in solitary pulmonary nodules:
+  application to small radiologically indeterminate nodules. *Archives of
+  Internal Medicine*, 157(8), 849-855.
+- Tolosi, L., & Lengauer, T. (2011). Classification with correlated features:
+  unreliability of feature ranking and solutions. *Bioinformatics*, 27(14),
+  1986-1994.
+- Traverso, A., Wee, L., Dekker, A., & Gillies, R. (2018). Repeatability and
+  reproducibility of radiomic features: a systematic review. *International
+  Journal of Radiation Oncology, Biology, Physics*, 102(4), 1143-1158.
+- van der Walt, S., Schönberger, J. L., Nunez-Iglesias, J., Boulogne, F.,
+  Warner, J. D., Yager, N., et al. (2014). scikit-image: image processing in
+  Python. *PeerJ*, 2, e453.
+- van Griethuysen, J. J. M., et al. (2017). Computational radiomics system to
+  decode the radiographic phenotype. *Cancer Research*, 77(21), e104-e107.
+- van Timmeren, J. E., Cester, D., Tanadini-Lang, S., Alkadhi, H., & Baessler, B.
+  (2020). Radiomics in medical imaging: how-to guide and critical reflection.
+  *Insights into Imaging*, 11(1), 91.
+- van Velden, F. H. P., et al. (2016). Repeatability of radiomic features in
+  non-small-cell lung cancer PET/CT studies. *Molecular Imaging and Biology*,
+  18(5), 788-795.
+- Zhang, W., Guo, Y., & Jin, Q. (2023). Radiomics and its feature selection: a
+  review. *Symmetry*, 15(10), 1834.
+- Zhao, B. (2021). Understanding sources of variation to improve the
+  reproducibility of radiomics. *Frontiers in Oncology*, 11, 633176.
+- Zwanenburg, A., et al. (2020). The image biomarker standardization initiative:
+  standardized quantitative radiomics for high-throughput image-based
+  phenotyping. *Radiology*, 295(2), 328-338.
+
+\
+
+# Informações da sessão
+
+```{r sessao}
+sessionInfo()
+```
