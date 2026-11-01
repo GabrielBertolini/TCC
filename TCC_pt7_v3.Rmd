@@ -1,0 +1,2525 @@
+---
+title: "Método de Agrupamento para Análise de Estabilidade e Reprodutibilidade em Radiômica"
+
+output:
+  html_document:
+    number_sections: FALSE
+    theme: "cosmo"
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+author: "Gabriel Bertolini | Orientador: Prof. Dr. Cristiano Lima Hackmann, Departamento de Estatística, UFRGS"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", cache.lazy = FALSE)
+options(scipen = 999)
+fmt  <- function(x, d = 3) formatC(x, format = "f", digits = d, decimal.mark = ",")
+pct  <- function(x, d = 0) paste0(formatC(100 * x, format = "f", digits = d, decimal.mark = ","), " %")
+nome <- function(x) gsub("original_", "", x)
+```
+
+# 1. Objetivo
+
+Este trabalho avalia um **método de agrupamento** para analisar a estabilidade
+e a reprodutibilidade da seleção de descritores radiômicos. Em radiômica,
+muitos descritores carregam praticamente a mesma informação, e, com poucos
+pacientes, a seleção de variáveis tende a alternar entre descritores
+redundantes, o que dá a impressão de instabilidade. A proposta é agrupar os
+descritores redundantes e usar os grupos como unidade de análise: verificar se
+esses grupos são reprodutíveis e se a seleção é mais estável quando lida no
+nível dos grupos do que no nível dos descritores individuais.
+
+**Reprodutibilidade e estabilidade.** Os dois termos tratam da confiança que
+se pode ter nos resultados, mas olham para coisas diferentes. A
+**reprodutibilidade** pergunta se um resultado se repete quando a análise é
+refeita em outras condições: com outros pacientes da mesma população ou com
+outras decisões de método, igualmente razoáveis. Neste trabalho, ela é
+avaliada nos grupos de descritores: se os mesmos descritores voltam a se
+agrupar quando os pacientes são reamostrados ou quando se troca, por exemplo,
+o tipo de correlação usado no agrupamento. A **estabilidade** pergunta se um
+método de seleção de variáveis escolhe sempre as mesmas variáveis quando os
+dados mudam um pouco, como acontece de uma partição da validação cruzada para
+outra. Um método estável aponta, a cada repetição, para as mesmas variáveis;
+um instável troca de escolha a cada nova amostra, o que dificulta saber quais
+descritores realmente importam (Nogueira, Sechidis e Brown, 2018).
+
+| | Reprodutibilidade | Estabilidade |
+|---|---|---|
+| **O que se verifica** | o agrupamento dos descritores | a escolha de variáveis feita pelo modelo |
+| **Pergunta** | os mesmos descritores voltam a formar os mesmos grupos? | o modelo escolhe sempre as mesmas variáveis para prever o diagnóstico? |
+| **Usa o diagnóstico?** | não: o agrupamento só olha a correlação entre os descritores | sim: a escolha depende de quais variáveis ajudam a prever o câncer |
+| **Como se perturba** | reamostrando pacientes e trocando decisões de método | trocando as partições da validação cruzada |
+| **Medidas** | ARI, critério de Hennig | Jaccard e Φ, ajustados pelo acaso |
+
+A aplicação é a distinção entre adenocarcinoma pulmonar primário e metástase
+pulmonar de adenocarcinoma colorretal, em 96 pacientes descritos por 105
+descritores radiômicos de tomografia, extraídos com o PyRadiomics. Para que o
+desempenho seja medido em pacientes não usados em nenhuma decisão da análise,
+20 % dos pacientes (19) foram separados no início, por sorteio estratificado
+pelo diagnóstico e pelo protocolo de contraste, num **conjunto de teste**
+guardado e usado uma única vez, ao final (Seção 13). Todas as demais análises
+usam apenas os 77 pacientes de **treino**; nelas, a validação cruzada serve
+para escolher modelos, limiares e hiperparâmetros.
+
+**Objetivos específicos:**
+
+1. agrupar, por correlação, os descritores sem efeito do protocolo de
+   contraste (Seções 9 e 10);
+2. avaliar a reprodutibilidade dos grupos sob reamostragem dos pacientes e sob
+   diferentes decisões de método (Seção 11);
+3. comparar a estabilidade da seleção de variáveis nos níveis de descritor e de
+   grupo, sempre contra uma linha de base do acaso (Seção 12).
+
+**O papel das regressões logísticas.** As Seções 5 a 8 estabelecem a
+**referência preditiva** do trabalho: uma regressão logística com uma única
+variável de forma, a esfericidade, interpretável pela clínica (modelo base),
+comparada a uma regressão logística com os 105 descritores penalizada por
+elastic net. O modelo base serve de régua para os modelos usados na análise de
+estabilidade, porque uma seleção estável só tem valor se o modelo
+correspondente também for capaz de prever. Em todas as comparações, a métrica
+principal é o F1-score, acompanhado da acurácia, da matriz de confusão e da
+AUC, com o limiar de classificação escolhido dentro da validação cruzada.
+
+| Parte | Seções | Conteúdo |
+|---|---|---|
+| Dados | 3 e 4 | descrição das variáveis e análise descritiva |
+| Referência preditiva | 5 a 8 | modelo base com a esfericidade e modelo completo com elastic net |
+| Método de agrupamento | 9 a 12 | filtro do contraste, agrupamento, reprodutibilidade e estabilidade da seleção |
+| Avaliação final | 13 | desempenho dos modelos finais no conjunto de teste |
+
+\
+
+# 2. Pacotes e parâmetros
+
+```{r pacotes}
+library(readr); library(dplyr); library(ggplot2)
+library(knitr); library(kableExtra)
+library(pROC); library(caret); library(glmnet)
+library(randomForest); library(pheatmap)
+```
+
+```{r config}
+CAMINHO <- "C:/Users/gabri/OneDrive/Documentos/TCC/bd_rad_clinico.csv"
+
+# Separação treino e teste (feita no próprio código, Seção 3.1)
+PROP_TESTE        <- 0.20     # proporção do conjunto de teste
+SEMENTE_SEPARACAO <- 42       # semente do sorteio
+CRITERIOS_LIMIAR  <- c("F1", "F2", "Acurácia balanceada", "Limiar fixo de 0,5")   # Seção 7.5
+
+N_SEEDS   <- 10                       # repetições da validação cruzada
+N_FOLDS   <- 5                        # folds externos
+N_FOLDS_I <- 5                        # folds internos (hiperparâmetros)
+N_REP_I   <- 5                        # repetições da validação interna
+GRADE_LIMIAR <- seq(0, 1, by = 0.01)  # limiares de probabilidade testados
+GRADE_ALFA   <- seq(0, 1, by = 0.1)   # alfa do elastic net (0 = ridge, 1 = LASSO)
+SEMENTE <- 42
+
+# Parte 2: grupos de descritores
+LIM_DESPREZIVEL <- 0.147              # delta de Cliff desprezível
+CORTE        <- 0.20                  # corte do dendrograma: d = 1 - |rho|
+B_BOOT       <- 300                   # reamostragens de reprodutibilidade
+NTREE        <- 500                   # árvores do Random Forest
+K_GRID       <- c(3, 5, 7)            # tamanhos do conjunto selecionado
+TOP_K        <- 5                     # k de referência
+B_ACASO      <- 2000                  # sorteios para a linha de base do acaso
+B_PERM       <- 200                   # permutações do diagnóstico
+N_SEEDS_PERM <- 5                     # sementes por permutação
+R_GRUPO      <- 10                    # embaralhamentos por grupo (importância agrupada)
+R_GRUPO_PERM <- 3                     # idem, dentro do teste de permutação
+K_GRID_G     <- c(1, 2, 3)            # grupos selecionados (importância agrupada)
+TOP_K_G      <- 2                     # k de referência para grupos
+```
+
+\
+
+# 3. Dados
+
+```{r dados}
+bruto <- read_csv(CAMINHO, show_col_types = FALSE)
+feat_todas <- names(bruto)[grepl("^original_", names(bruto))]
+
+falt <- apply(is.na(bruto[, feat_todas]), 1, any)
+if (any(falt)) cat("Excluídos por radiômica ausente:",
+                   paste(if ("id_table" %in% names(bruto)) bruto$id_table[falt] else which(falt), collapse = ", "), "\n")
+dados_todos <- bruto[!falt, ]
+
+# Separação estratificada por diagnóstico e protocolo: 20 % de cada estrato vão para o teste
+dx_todos <- ifelse(grepl("pulm", iconv(dados_todos$diagnostico, to = "ASCII//TRANSLIT"), ignore.case = TRUE), "Pulmão", "Colorretal")
+ct_todos <- ifelse(grepl("^s", trimws(tolower(iconv(dados_todos$contraste, to = "ASCII//TRANSLIT")))), "Com contraste", "Sem contraste")
+estrato  <- paste(dx_todos, ct_todos, sep = " | ")
+set.seed(SEMENTE_SEPARACAO)
+idx_teste <- unlist(lapply(split(seq_len(nrow(dados_todos)), estrato), function(ix)
+  ix[sample.int(length(ix), round(PROP_TESTE * length(ix)))]), use.names = FALSE)
+dados_teste <- dados_todos[idx_teste, ]      # teste: ignorado até a Seção 13
+dados       <- dados_todos[-idx_teste, ]     # treino: usado em todo o resto
+
+const <- feat_todas[sapply(dados[, feat_todas], function(x) length(unique(x)) <= 1)]
+feat  <- setdiff(feat_todas, const)
+
+y  <- as.integer(grepl("pulm", iconv(dados$diagnostico, to = "ASCII//TRANSLIT"), ignore.case = TRUE))
+ct <- as.integer(grepl("^s", trimws(tolower(iconv(dados$contraste, to = "ASCII//TRANSLIT")))))
+X  <- as.matrix(dados[, feat]); storage.mode(X) <- "double"
+n  <- nrow(X); p <- ncol(X)
+familia <- sapply(strsplit(feat, "_"), `[`, 2)
+esf <- X[, "original_shape_Sphericity"]
+
+cat("Amostra analítica: n =", n, "| p =", p, "\n")
+```
+
+O desfecho é codificado como $y = 1$ para adenocarcinoma pulmonar (classe
+positiva) e $y = 0$ para colorretal. Assim, um **falso negativo** é uma lesão
+pulmonar classificada como colorretal.
+
+## 3.1 Separação entre treino e teste
+
+Antes de qualquer análise, os pacientes com radiômica completa são divididos
+em dois conjuntos, no próprio código (chunk `dados`): em cada combinação de
+diagnóstico e protocolo de contraste, `r pct(PROP_TESTE)` dos pacientes são
+sorteados (semente `r SEMENTE_SEPARACAO`) para o **conjunto de teste**; os
+restantes formam o **conjunto de treino**, usado em todo este relatório até a
+Seção 12. Os pacientes de teste ficam guardados num objeto à parte
+(`dados_teste`), que é ignorado em todas as etapas e só é usado na Seção 13,
+para a comparação final dos modelos. A separação evita que decisões da análise, como a
+escolha de variáveis, o filtro do contraste e o agrupamento, sejam tomadas com
+pacientes que depois servirão para medir o desempenho.
+
+```{r composicao-separacao}
+tab_sep <- data.frame(Grupo = estrato, Conjunto = ifelse(seq_along(estrato) %in% idx_teste, "Teste", "Treino"))
+tab_sep <- as.data.frame.matrix(table(tab_sep$Grupo, tab_sep$Conjunto))
+tab_sep <- data.frame(Grupo = rownames(tab_sep), Total = tab_sep$Teste + tab_sep$Treino,
+                      Treino = tab_sep$Treino, Teste = tab_sep$Teste, check.names = FALSE)
+tab_sep <- rbind(tab_sep, data.frame(Grupo = "Total", Total = sum(tab_sep$Total),
+                                     Treino = sum(tab_sep$Treino), Teste = sum(tab_sep$Teste)))
+kable(tab_sep, format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+      caption = "Tabela 1. Separação estratificada entre treino e teste") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  row_spec(nrow(tab_sep), bold = TRUE)
+```
+
+## 3.2 Descrição das variáveis
+
+Os descritores foram extraídos com o PyRadiomics (van Griethuysen et al.,
+2017) na imagem original, sem filtros. Neste trabalho, **família** é a classe
+de descritores do PyRadiomics, identificada pelo prefixo do nome da variável.
+A primeira tabela resume as famílias, e a segunda, que pode ser aberta com um clique, descreve cada
+descritor.
+
+```{r familias-tab, echo=FALSE}
+tab_familias <- data.frame(
+  Família = c("shape", "firstorder", "glcm", "glrlm", "glszm", "gldm", "ngtdm"),
+  Nome = c("Forma", "Primeira ordem", "Matriz de coocorrência de níveis de cinza",
+           "Matriz de comprimento de corrida", "Matriz de tamanho de zona",
+           "Matriz de dependência de nível de cinza", "Matriz de diferença de tom de vizinhança"),
+  Descritores = as.integer(table(factor(familia, c("shape", "firstorder", "glcm", "glrlm",
+                                                     "glszm", "gldm", "ngtdm")))),
+  Descrição = c(
+    "Tamanho e forma tridimensional da lesão, calculados apenas pela segmentação, sem usar intensidades.",
+    "Distribuição das intensidades dos voxels da lesão, sem considerar a posição de cada voxel.",
+    "Textura pela frequência com que pares de níveis de cinza ocorrem em voxels vizinhos.",
+    "Textura por sequências de voxels consecutivos com o mesmo nível de cinza (corridas) numa direção.",
+    "Textura por regiões de voxels conectados com o mesmo nível de cinza (zonas), em qualquer direção.",
+    "Textura pelo número de vizinhos com intensidade semelhante à de cada voxel (dependência).",
+    "Textura pela diferença entre cada voxel e a média de seus vizinhos."),
+  check.names = FALSE)
+
+kable(tab_familias, format = "html", row.names = FALSE, align = c("l", "l", "c", "l"),
+      caption = "Tabela 2. Famílias de descritores do PyRadiomics") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  column_spec(4, width = "50%")
+```
+
+<details><summary><b>Tabela 3. Descrição de cada descritor</b> (clique para abrir)</summary>
+
+```{r descritores-tab, echo=FALSE}
+desc_curta <- c(
+  # forma
+  shape_Elongation = "Grau de alongamento (inverso)",
+  shape_Flatness = "Grau de achatamento (inverso)",
+  shape_LeastAxisLength = "Menor eixo do elipsoide",
+  shape_MajorAxisLength = "Maior eixo do elipsoide",
+  shape_Maximum2DDiameterColumn = "Maior diâmetro no plano coronal",
+  shape_Maximum2DDiameterRow = "Maior diâmetro no plano sagital",
+  shape_Maximum2DDiameterSlice = "Maior diâmetro no plano axial",
+  shape_Maximum3DDiameter = "Maior diâmetro em 3D",
+  shape_MeshVolume = "Volume calculado pela malha",
+  shape_MinorAxisLength = "Eixo intermediário do elipsoide",
+  shape_Sphericity = "Proximidade a uma esfera",
+  shape_SurfaceArea = "Área da superfície da lesão",
+  shape_SurfaceVolumeRatio = "Razão entre superfície e volume",
+  shape_VoxelVolume = "Volume pela contagem de voxels",
+  # primeira ordem
+  firstorder_10Percentile = "Percentil 10 das intensidades",
+  firstorder_90Percentile = "Percentil 90 das intensidades",
+  firstorder_Energy = "Soma dos quadrados das intensidades",
+  firstorder_Entropy = "Aleatoriedade do histograma de intensidades",
+  firstorder_InterquartileRange = "Amplitude interquartil das intensidades",
+  firstorder_Kurtosis = "Peso das caudas (curtose)",
+  firstorder_Maximum = "Intensidade máxima",
+  firstorder_MeanAbsoluteDeviation = "Desvio absoluto médio",
+  firstorder_Mean = "Intensidade média",
+  firstorder_Median = "Intensidade mediana",
+  firstorder_Minimum = "Intensidade mínima",
+  firstorder_Range = "Amplitude das intensidades",
+  firstorder_RobustMeanAbsoluteDeviation = "Desvio absoluto médio robusto",
+  firstorder_RootMeanSquared = "Raiz da média quadrática",
+  firstorder_Skewness = "Assimetria das intensidades",
+  firstorder_TotalEnergy = "Energia multiplicada pelo volume do voxel",
+  firstorder_Uniformity = "Homogeneidade do histograma de intensidades",
+  firstorder_Variance = "Variância das intensidades",
+  # GLCM
+  glcm_Autocorrelation = "Finura ou grosseria da textura",
+  glcm_JointAverage = "Nível de cinza médio dos pares",
+  glcm_ClusterProminence = "Assimetria da matriz (4.º momento)",
+  glcm_ClusterShade = "Assimetria da matriz (3.º momento)",
+  glcm_ClusterTendency = "Agrupamento de níveis semelhantes",
+  glcm_Contrast = "Variação local de intensidade",
+  glcm_Correlation = "Dependência linear entre vizinhos",
+  glcm_DifferenceAverage = "Diferença média entre vizinhos",
+  glcm_DifferenceEntropy = "Aleatoriedade das diferenças entre vizinhos",
+  glcm_DifferenceVariance = "Variabilidade das diferenças entre vizinhos",
+  glcm_JointEnergy = "Homogeneidade dos pares de vizinhos",
+  glcm_JointEntropy = "Aleatoriedade dos pares de vizinhos",
+  glcm_Imc1 = "Correlação informacional entre vizinhos (1)",
+  glcm_Imc2 = "Correlação informacional entre vizinhos (2)",
+  glcm_Idm = "Homogeneidade local (momento inverso)",
+  glcm_Idmn = "Homogeneidade local normalizada (momento)",
+  glcm_Id = "Homogeneidade local (diferença inversa)",
+  glcm_Idn = "Homogeneidade local normalizada (diferença)",
+  glcm_InverseVariance = "Predomínio de pequenas diferenças",
+  glcm_MaximumProbability = "Par de níveis mais frequente",
+  glcm_SumEntropy = "Aleatoriedade das somas dos pares",
+  glcm_SumSquares = "Variância dos níveis dos pares",
+  # GLRLM
+  glrlm_GrayLevelNonUniformity = "Variabilidade dos níveis (não normalizada)",
+  glrlm_GrayLevelNonUniformityNormalized = "Variabilidade dos níveis (normalizada)",
+  glrlm_GrayLevelVariance = "Variância dos níveis das corridas",
+  glrlm_HighGrayLevelRunEmphasis = "Corridas de nível alto",
+  glrlm_LongRunEmphasis = "Corridas longas (textura grosseira)",
+  glrlm_LongRunHighGrayLevelEmphasis = "Corridas longas de nível alto",
+  glrlm_LongRunLowGrayLevelEmphasis = "Corridas longas de nível baixo",
+  glrlm_LowGrayLevelRunEmphasis = "Corridas de nível baixo",
+  glrlm_RunEntropy = "Aleatoriedade das corridas",
+  glrlm_RunLengthNonUniformity = "Variabilidade dos comprimentos (não normalizada)",
+  glrlm_RunLengthNonUniformityNormalized = "Variabilidade dos comprimentos (normalizada)",
+  glrlm_RunPercentage = "Proporção de corridas por voxel",
+  glrlm_RunVariance = "Variância dos comprimentos de corrida",
+  glrlm_ShortRunEmphasis = "Corridas curtas (textura fina)",
+  glrlm_ShortRunHighGrayLevelEmphasis = "Corridas curtas de nível alto",
+  glrlm_ShortRunLowGrayLevelEmphasis = "Corridas curtas de nível baixo",
+  # GLSZM
+  glszm_GrayLevelNonUniformity = "Variabilidade dos níveis (não normalizada)",
+  glszm_GrayLevelNonUniformityNormalized = "Variabilidade dos níveis (normalizada)",
+  glszm_GrayLevelVariance = "Variância dos níveis das zonas",
+  glszm_HighGrayLevelZoneEmphasis = "Zonas de nível alto",
+  glszm_LargeAreaEmphasis = "Zonas grandes (textura grosseira)",
+  glszm_LargeAreaHighGrayLevelEmphasis = "Zonas grandes de nível alto",
+  glszm_LargeAreaLowGrayLevelEmphasis = "Zonas grandes de nível baixo",
+  glszm_LowGrayLevelZoneEmphasis = "Zonas de nível baixo",
+  glszm_SizeZoneNonUniformity = "Variabilidade dos tamanhos (não normalizada)",
+  glszm_SizeZoneNonUniformityNormalized = "Variabilidade dos tamanhos (normalizada)",
+  glszm_SmallAreaEmphasis = "Zonas pequenas (textura fina)",
+  glszm_SmallAreaHighGrayLevelEmphasis = "Zonas pequenas de nível alto",
+  glszm_SmallAreaLowGrayLevelEmphasis = "Zonas pequenas de nível baixo",
+  glszm_ZoneEntropy = "Aleatoriedade das zonas",
+  glszm_ZonePercentage = "Proporção de zonas por voxel",
+  glszm_ZoneVariance = "Variância dos tamanhos de zona",
+  # GLDM
+  gldm_DependenceEntropy = "Aleatoriedade das dependências",
+  gldm_DependenceNonUniformity = "Variabilidade das dependências (não normalizada)",
+  gldm_DependenceNonUniformityNormalized = "Variabilidade das dependências (normalizada)",
+  gldm_DependenceVariance = "Variância das dependências",
+  gldm_GrayLevelNonUniformity = "Variabilidade dos níveis (não normalizada)",
+  gldm_GrayLevelVariance = "Variância dos níveis",
+  gldm_HighGrayLevelEmphasis = "Concentração de níveis altos",
+  gldm_LargeDependenceEmphasis = "Dependências grandes (mais homogêneo)",
+  gldm_LargeDependenceHighGrayLevelEmphasis = "Dependências grandes de nível alto",
+  gldm_LargeDependenceLowGrayLevelEmphasis = "Dependências grandes de nível baixo",
+  gldm_LowGrayLevelEmphasis = "Concentração de níveis baixos",
+  gldm_SmallDependenceEmphasis = "Dependências pequenas (mais heterogêneo)",
+  gldm_SmallDependenceHighGrayLevelEmphasis = "Dependências pequenas de nível alto",
+  gldm_SmallDependenceLowGrayLevelEmphasis = "Dependências pequenas de nível baixo",
+  # NGTDM
+  ngtdm_Busyness = "Mudanças rápidas entre vizinhos",
+  ngtdm_Coarseness = "Grosseria da textura",
+  ngtdm_Complexity = "Complexidade da textura",
+  ngtdm_Contrast = "Contraste espacial de intensidade",
+  ngtdm_Strength = "Nitidez dos padrões de textura")
+
+nomes_curtos <- nome(feat)
+faltando <- setdiff(nomes_curtos, names(desc_curta))
+if (length(faltando)) warning("Descritores sem descrição: ", paste(faltando, collapse = ", "))
+
+tab_desc <- data.frame(
+  Família = familia,
+  Descritor = sub("^[^_]+_", "", nomes_curtos),
+  Descrição = unname(desc_curta[nomes_curtos]),
+  check.names = FALSE)
+
+kable(tab_desc, format = "html", row.names = FALSE, align = c("l", "l", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 13) %>%
+  collapse_rows(columns = 1, valign = "top") %>%
+  scroll_box(height = "520px")
+```
+
+</details>
+
+> Nos descritores de textura, "nível alto" e "nível baixo" referem-se aos
+> níveis de cinza após a discretização das intensidades em faixas de largura
+> fixa. Como a primeira faixa é sempre a que contém a menor intensidade da
+> lesão, um nível alto indica intensidades distantes do mínimo da própria
+> lesão, e não necessariamente valores altos em unidades Hounsfield. Os
+> descritores marcados como "não normalizada" dependem do número total de
+> corridas, zonas ou voxels e, portanto, crescem com o tamanho da lesão.
+
+\
+
+# 4. Análise descritiva
+
+## 4.1 Composição da amostra
+
+```{r composicao}
+tab_cruz <- table(Protocolo = ifelse(ct == 1, "Com contraste", "Sem contraste"),
+                  Diagnóstico = ifelse(y == 1, "Pulmão", "Colorretal"))
+kable(addmargins(tab_cruz, FUN = list(Total = sum), quiet = TRUE), format = "html",
+      caption = "Tabela 4. Pacientes por diagnóstico e protocolo de contraste") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+## 4.2 Distribuição dos descritores
+
+A assimetria de cada descritor é medida pelo coeficiente de assimetria
+amostral; valores acima de 1 em módulo indicam distribuição fortemente
+assimétrica.
+
+```{r assimetria}
+assim <- function(v) mean((v - mean(v))^3) / sd(v)^3
+sk <- apply(X, 2, assim)
+
+data.frame(Família = familia, sk = sk) %>%
+  group_by(Família) %>%
+  summarise(Descritores = n(),
+            `Assimetria mediana` = round(median(sk), 2),
+            `Com assimetria acima de 1 (em módulo)` = sum(abs(sk) > 1),
+            `Maior assimetria (em módulo)` = round(max(abs(sk)), 1), .groups = "drop") %>%
+  arrange(desc(Descritores)) %>%
+  kable(format = "html", align = c("l", rep("c", 4)),
+        caption = "Tabela 5. Assimetria dos descritores por família") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r forma-figura, fig.width=9, fig.height=3.8, fig.cap="Figura 1. Esfericidade, volume e energia por diagnóstico e protocolo. Volume e energia em escala logarítmica."}
+vars_fig <- c(Esfericidade = "original_shape_Sphericity",
+              `Volume (mm³)` = "original_shape_MeshVolume",
+              Energia = "original_firstorder_Energy")
+do.call(rbind, lapply(names(vars_fig), function(v)
+  data.frame(variavel = v, valor = X[, vars_fig[v]],
+             dx = ifelse(y == 1, "Pulmão", "Colorretal"),
+             protocolo = ifelse(ct == 1, "Com contraste", "Sem contraste")))) %>%
+  mutate(valor = ifelse(variavel == "Esfericidade", valor, log10(valor)),
+         variavel = ifelse(variavel == "Esfericidade", variavel, paste0("log10 ", variavel))) %>%
+  ggplot(aes(dx, valor, fill = protocolo)) +
+  geom_boxplot(alpha = .35, outlier.shape = NA, position = position_dodge(.75)) +
+  geom_point(aes(colour = protocolo), size = 1.4, alpha = .7,
+             position = position_jitterdodge(jitter.width = .15, dodge.width = .75, seed = 1)) +
+  facet_wrap(~ variavel, scales = "free_y") +
+  scale_fill_manual(values = c("Sem contraste" = "#2A7F84", "Com contraste" = "#E0A030"), name = NULL) +
+  scale_colour_manual(values = c("Sem contraste" = "#1F5F63", "Com contraste" = "#B07A12"), name = NULL) +
+  labs(x = NULL, y = NULL) + theme_minimal(base_size = 11) + theme(legend.position = "bottom")
+```
+
+> `r sum(abs(sk) > 1)` dos `r p` descritores têm assimetria acima de 1 em
+> módulo. Medidas de tamanho e de energia são as mais assimétricas: poucas
+> lesões muito grandes concentram valores extremos. Por isso, na modelagem,
+> descritores estritamente positivos e muito assimétricos recebem
+> transformação logarítmica (Seção 5.4).
+
+## 4.3 Estatísticas resumo e comparação entre diagnósticos
+
+Para cada descritor, apresentam-se a mediana e os quartis no geral e em cada
+diagnóstico, e a comparação entre pulmão e colorretal pelo teste de
+Mann-Whitney. Como são `r p` testes simultâneos, os p-valores são corrigidos
+pela taxa de falsas descobertas (FDR) de Benjamini e Hochberg (1995).
+
+```{r resumo-descritores}
+fmt_g <- function(x) trimws(formatC(signif(x, 3), format = "fg", digits = 3, big.mark = ".", decimal.mark = ","))
+med_iqr <- function(v) sprintf("%s [%s; %s]", fmt_g(median(v)), fmt_g(quantile(v, .25)), fmt_g(quantile(v, .75)))
+p_mw  <- apply(X, 2, function(v) wilcox.test(v[y == 1], v[y == 0], exact = FALSE)$p.value)
+p_fdr <- p.adjust(p_mw, method = "BH")
+
+tab_mw <- data.frame(
+  Família = familia, Descritor = sub("^[^_]+_", "", nome(feat)),
+  Geral = apply(X, 2, med_iqr),
+  Pulmão = apply(X[y == 1, ], 2, med_iqr),
+  Colorretal = apply(X[y == 0, ], 2, med_iqr),
+  `p (Mann-Whitney)` = p_mw, `p ajustado (FDR)` = p_fdr,
+  check.names = FALSE, row.names = NULL)
+```
+
+> Após a correção, `r sum(p_fdr < 0.05)` dos `r p` descritores diferem entre
+> pulmão e colorretal ao nível de 5 %. A Tabela 6 mostra os de menor p-valor; a
+> tabela completa está logo abaixo.
+
+```{r resumo-top}
+tab_mw %>% arrange(`p (Mann-Whitney)`) %>% head(12) %>%
+  mutate(`p (Mann-Whitney)` = format.pval(`p (Mann-Whitney)`, digits = 2, eps = .001),
+         `p ajustado (FDR)` = format.pval(`p ajustado (FDR)`, digits = 2, eps = .001)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c", "c", "c", "c"),
+        caption = "Tabela 6. Descritores com maior diferença entre os diagnósticos: mediana [1.º; 3.º quartil] e teste de Mann-Whitney") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE, font_size = 13)
+```
+
+<details><summary><b>Tabela 7. Estatísticas resumo dos 105 descritores</b> (clique para abrir; em amarelo, diferença significativa entre os diagnósticos, p ajustado &lt; 0,05)</summary>
+
+```{r resumo-completo}
+sig_geral <- tab_mw$`p ajustado (FDR)` < 0.05
+tab_mw %>%
+  mutate(`p (Mann-Whitney)` = format.pval(`p (Mann-Whitney)`, digits = 2, eps = .001),
+         `p ajustado (FDR)` = format.pval(`p ajustado (FDR)`, digits = 2, eps = .001)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 12) %>%
+  row_spec(which(sig_geral), background = "#FFF6CC") %>%
+  collapse_rows(columns = 1, valign = "top") %>%
+  scroll_box(height = "480px")
+```
+
+</details>
+
+<details><summary><b>Tabela 8. Mediana por diagnóstico em cada protocolo de contraste</b> (clique para abrir; em amarelo, diferença significativa naquele protocolo, p ajustado &lt; 0,05)</summary>
+
+```{r resumo-protocolo}
+med_grp <- function(sel) apply(X[sel, , drop = FALSE], 2, function(v) fmt_g(median(v)))
+p_fdr_ct <- function(sel) p.adjust(apply(X[sel, ], 2, function(v)
+  wilcox.test(v[y[sel] == 1], v[y[sel] == 0], exact = FALSE)$p.value), method = "BH")
+pc_com <- p_fdr_ct(ct == 1); pc_sem <- p_fdr_ct(ct == 0)
+amarelo <- function(sig) ifelse(sig, "#FFF6CC", "transparent")
+data.frame(
+  Família = familia, Descritor = sub("^[^_]+_", "", nome(feat)),
+  `Com contraste: pulmão` = med_grp(y == 1 & ct == 1),
+  `Com contraste: colorretal` = med_grp(y == 0 & ct == 1),
+  `Com contraste: p (FDR)` = format.pval(pc_com, digits = 2, eps = .001),
+  `Sem contraste: pulmão` = med_grp(y == 1 & ct == 0),
+  `Sem contraste: colorretal` = med_grp(y == 0 & ct == 0),
+  `Sem contraste: p (FDR)` = format.pval(pc_sem, digits = 2, eps = .001),
+  check.names = FALSE, row.names = NULL) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", rep("c", 6))) %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 12) %>%
+  column_spec(3:5, background = amarelo(pc_com < 0.05)) %>%
+  column_spec(6:8, background = amarelo(pc_sem < 0.05)) %>%
+  collapse_rows(columns = 1, valign = "top") %>%
+  scroll_box(height = "480px")
+```
+
+</details>
+
+```{r resumo-protocolo-texto, echo=FALSE}
+n_sig_com <- sum(p_fdr_ct(ct == 1) < 0.05); n_sig_sem <- sum(p_fdr_ct(ct == 0) < 0.05)
+```
+
+> Separando por protocolo, `r n_sig_com` descritores diferem entre os
+> diagnósticos nos exames com contraste (`r sum(ct == 1)` pacientes) e
+> `r n_sig_sem` nos exames sem contraste (`r sum(ct == 0)` pacientes). O
+> subgrupo sem contraste é menor, o que reduz o poder dos testes, mas a
+> diferença entre os dois números é grande demais para ser explicada só por
+> isso e merece ser investigada: pode refletir diferenças entre os pacientes
+> que realizaram cada tipo de exame, como o tamanho das lesões.
+
+## 4.4 Valores extremos univariados
+
+Um valor é considerado extremo quando fica a mais de três intervalos
+interquartis abaixo do primeiro quartil ou acima do terceiro (regra de Tukey
+para valores extremos, mais conservadora que a usual de 1,5 intervalo).
+
+```{r outliers-uni}
+extremo <- apply(X, 2, function(v) {
+  q <- quantile(v, c(.25, .75)); iqr <- q[2] - q[1]
+  v < q[1] - 3 * iqr | v > q[2] + 3 * iqr
+})
+por_var <- colSums(extremo); por_pac <- rowSums(extremo)
+
+data.frame(Descritor = nome(feat), Família = familia, `Pacientes extremos` = por_var,
+           check.names = FALSE) %>%
+  arrange(desc(`Pacientes extremos`)) %>% head(10) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c"),
+        caption = "Tabela 9. Descritores com mais valores extremos (regra de 3 intervalos interquartis)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+O mesmo critério é aplicado também dentro de cada diagnóstico e de cada
+protocolo, porque um valor pode ser extremo no geral apenas por pertencer a um
+grupo com valores tipicamente diferentes.
+
+```{r outliers-recortes}
+conta_ext <- function(sel) apply(X[sel, , drop = FALSE], 2, function(v) {
+  q <- quantile(v, c(.25, .75)); iqr <- q[2] - q[1]
+  sum(v < q[1] - 3 * iqr | v > q[2] + 3 * iqr)
+})
+recortes <- list(Geral = rep(TRUE, n), Pulmão = y == 1, Colorretal = y == 0,
+                 `Com contraste` = ct == 1, `Sem contraste` = ct == 0)
+tab_rec <- sapply(recortes, conta_ext)
+data.frame(Descritor = nome(feat), tab_rec, check.names = FALSE, row.names = NULL) %>%
+  arrange(desc(Geral)) %>% head(10) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", rep("c", 5)),
+        caption = "Tabela 10. Número de pacientes com valor extremo, por recorte (descritores com mais extremos no geral)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  add_header_above(c(" " = 2, "Diagnóstico" = 2, "Protocolo" = 2))
+```
+
+> No total, há `r sum(tab_rec[, "Geral"])` valores extremos no geral,
+> `r sum(tab_rec[, "Pulmão"]) + sum(tab_rec[, "Colorretal"])` somando os dois
+> diagnósticos e `r sum(tab_rec[, "Com contraste"]) + sum(tab_rec[, "Sem contraste"])`
+> somando os dois protocolos.
+
+
+```{r outliers-pac, fig.width=7, fig.height=3.6, fig.cap="Figura 2. Número de descritores em que cada paciente tem valor extremo."}
+ggplot(data.frame(k = por_pac, dx = ifelse(y == 1, "Pulmão", "Colorretal")), aes(k, fill = dx)) +
+  geom_histogram(binwidth = 2, boundary = 0, colour = "white") +
+  scale_fill_manual(values = c("Pulmão" = "#E07A5F", "Colorretal" = "#2A7F84"), name = NULL) +
+  labs(x = "Descritores com valor extremo", y = "Pacientes") +
+  theme_minimal(base_size = 11) + theme(legend.position = "bottom")
+```
+
+```{r outliers-pac-tab}
+ids <- if ("id_table" %in% names(dados)) dados$id_table else seq_len(n)
+lim_pac <- 0.10 * p
+data.frame(Paciente = ids, Diagnóstico = ifelse(y == 1, "Pulmão", "Colorretal"),
+           Protocolo = ifelse(ct == 1, "Com contraste", "Sem contraste"),
+           `Descritores extremos` = por_pac,
+           `Volume (mm³)` = round(X[, "original_shape_MeshVolume"]),
+           Esfericidade = round(esf, 3), check.names = FALSE) %>%
+  filter(`Descritores extremos` >= lim_pac) %>% arrange(desc(`Descritores extremos`)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "l", "c", "c", "c"),
+        caption = sprintf("Tabela 11. Pacientes com valor extremo em pelo menos 10 %% dos descritores (%d ou mais)", ceiling(lim_pac))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+## 4.5 Valores extremos multivariados
+
+Um paciente pode não ser extremo em nenhum descritor isolado e, ainda assim,
+ter uma combinação atípica de valores. Para verificar isso, os descritores são
+transformados (logaritmo nos positivos e assimétricos) e padronizados, e
+resumidos pelas componentes principais que explicam 80 % da variância. A
+distância de Mahalanobis de cada paciente nesse espaço é comparada ao quantil
+0,975 da distribuição qui-quadrado com tantos graus de liberdade quantas forem
+as componentes.
+
+```{r outliers-multi, fig.width=7, fig.height=4.6, fig.cap="Figura 3. Duas primeiras componentes principais. Pacientes identificados como extremos multivariados estão rotulados."}
+transf_log <- function(v) if (all(v > 0) && abs(assim(v)) > 1) log(v) else v
+Xt  <- apply(X, 2, transf_log)
+pca <- prcomp(Xt, center = TRUE, scale. = TRUE)
+k80 <- which(cumsum(pca$sdev^2) / sum(pca$sdev^2) >= 0.80)[1]
+esc <- scale(pca$x[, 1:k80])
+d2  <- rowSums(esc^2)
+corte_d2 <- qchisq(0.975, df = k80)
+out_multi <- d2 > corte_d2
+
+data.frame(pc1 = pca$x[, 1], pc2 = pca$x[, 2], id = ids, out = out_multi,
+           dx = ifelse(y == 1, "Pulmão", "Colorretal")) %>%
+  ggplot(aes(pc1, pc2, colour = dx)) +
+  geom_point(aes(shape = out), size = 2.4, alpha = .85) +
+  geom_text(data = function(d) subset(d, out), aes(label = id), size = 3, vjust = -0.9, show.legend = FALSE) +
+  scale_colour_manual(values = c("Pulmão" = "#E07A5F", "Colorretal" = "#2A7F84"), name = NULL) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), labels = c("típico", "extremo multivariado"), name = NULL) +
+  labs(x = sprintf("CP1 (%s da variância)", pct(pca$sdev[1]^2 / sum(pca$sdev^2))),
+       y = sprintf("CP2 (%s da variância)", pct(pca$sdev[2]^2 / sum(pca$sdev^2)))) +
+  theme_minimal(base_size = 11) + theme(legend.position = "bottom")
+```
+
+> São necessárias `r k80` componentes principais para explicar ao menos 80 % da
+> variância dos `r p` descritores; juntas, elas explicam
+> `r pct(sum(pca$sdev[1:k80]^2) / sum(pca$sdev^2), 1)`, o que indica forte
+> redundância entre os descritores. `r sum(out_multi)`
+> paciente(s) ultrapassam o limite da distância de Mahalanobis.
+> `r sum(por_pac >= lim_pac)` paciente(s) têm valor extremo em pelo menos 10 %
+> dos descritores. Os valores extremos correspondem, em geral, a lesões muito
+> grandes ou com composição atípica, e não a erros de registro; por isso, são
+> **mantidos** na análise. A transformação logarítmica e a padronização,
+> estimadas no treino de cada fold, reduzem a sua influência no modelo
+> completo.
+
+\
+
+### O que compõe as componentes principais
+
+Cada componente principal é uma combinação de todos os descritores, com pesos
+chamados **cargas**. Para interpretar as componentes que explicam 80 % da
+variância, as tabelas a seguir mostram os descritores de maior carga (em valor
+absoluto, com o sinal) e a correlação de cada componente com variáveis de
+interpretação conhecida.
+
+```{r pca-cargas}
+ve <- pca$sdev^2 / sum(pca$sdev^2)
+auc_simples <- function(s, g) { r <- rank(s); n1 <- sum(g == 1); n0 <- sum(g == 0)
+  a <- (sum(r[g == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0); max(a, 1 - a) }
+data.frame(
+  Componente = paste0("CP", seq_len(k80)),
+  `Variância explicada` = pct(ve[seq_len(k80)], 1),
+  `Descritores de maior carga` = sapply(seq_len(k80), function(k) {
+    L <- pca$rotation[, k]; o <- order(-abs(L))[1:6]
+    paste0(nome(colnames(Xt)[o]), " (", ifelse(L[o] > 0, "+", ""), fmt(L[o], 2), ")", collapse = "<br>") }),
+  check.names = FALSE) %>%
+  kable(format = "html", escape = FALSE, row.names = FALSE, align = c("c", "c", "l"),
+        caption = "Tabela 12. Descritores de maior carga em cada componente principal") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+cor_cp <- t(sapply(seq_len(k80), function(k) { sc <- pca$x[, k]
+  c(vol = cor(sc, log(X[, "original_shape_MeshVolume"]), method = "spearman"),
+    esf = cor(sc, esf, method = "spearman"),
+    media = cor(sc, X[, "original_firstorder_Mean"], method = "spearman"),
+    auc_dx = auc_simples(sc, y), auc_ct = auc_simples(sc, ct)) }))
+data.frame(Componente = paste0("CP", seq_len(k80)),
+           `Correlação com o log do volume` = fmt(cor_cp[, "vol"], 2),
+           `Correlação com a esfericidade` = fmt(cor_cp[, "esf"], 2),
+           `Correlação com a intensidade média (firstorder_Mean)` = fmt(cor_cp[, "media"], 2),
+           `AUC para o diagnóstico` = fmt(cor_cp[, "auc_dx"]),
+           `AUC para o protocolo` = fmt(cor_cp[, "auc_ct"]), check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = "c",
+        caption = "Tabela 13. Relação de cada componente com o tamanho, a forma, a intensidade, o diagnóstico e o protocolo") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> Juntas, as `r k80` componentes explicam `r pct(sum(ve[1:k80]), 1)` da
+> variância. A **CP1** (`r pct(ve[1], 1)`) tem correlação de
+> `r fmt(cor_cp[1, "vol"], 2)` com o log do volume e cargas de magnitude
+> semelhante em descritores de várias famílias, sobretudo os de tamanho, os de
+> textura não normalizados e os de zonas grandes; é, portanto, fortemente
+> associada ao tamanho da lesão. Entre as três, é a que mais separa os
+> diagnósticos (AUC de `r fmt(cor_cp[1, "auc_dx"])`). A **CP2**
+> (`r pct(ve[2], 1)`) tem as maiores cargas em descritores de entropia e de
+> complexidade das intensidades e, em sentido oposto, em descritores de
+> uniformidade; essa composição é compatível com uma dimensão de
+> heterogeneidade das intensidades. Observou-se correlação de
+> `r fmt(cor_cp[2, "esf"], 2)` entre a CP2 e a esfericidade, uma associação
+> que não implica relação direta entre a forma e a heterogeneidade. A **CP3**
+> (`r pct(ve[3], 1)`) reúne contribuições de descritores distintos, como a
+> assimetria da distribuição das intensidades, a probabilidade máxima e a
+> energia da matriz de coocorrência, sem uma interpretação única, e tem
+> associação fraca com o diagnóstico (AUC de `r fmt(cor_cp[3, "auc_dx"])`).
+> Como o sinal de uma componente principal é arbitrário, a interpretação se
+> baseia nas relações entre os descritores, e não no sinal isolado das cargas.
+
+## 4.6 Correlação entre os descritores
+
+A redundância entre os descritores é medida pela correlação de Spearman em
+valor absoluto, calculada para os `r choose(p, 2)` pares possíveis.
+
+```{r correlacao}
+rho_abs <- abs(cor(X, method = "spearman"))
+pares <- which(upper.tri(rho_abs), arr.ind = TRUE)
+tab_pares <- data.frame(`Descritor 1` = nome(feat[pares[, 1]]), `Descritor 2` = nome(feat[pares[, 2]]),
+                        rho = rho_abs[pares], check.names = FALSE)
+lims <- c(0.80, 0.90, 0.95, 0.99)
+data.frame(Limiar = paste0("|rho| ≥ ", fmt(lims, 2)),
+           Pares = sapply(lims, function(l) sum(tab_pares$rho >= l)),
+           `% dos pares` = sapply(lims, function(l) pct(mean(tab_pares$rho >= l), 1)),
+           `Descritores com ao menos um par` = sapply(lims, function(l) sum(rowSums(rho_abs >= l) > 1)),
+           check.names = FALSE) %>%
+  kable(format = "html", align = c("l", "c", "c", "c"),
+        caption = "Tabela 14. Pares de descritores fortemente correlacionados (Spearman, valor absoluto)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+tab_pares %>% arrange(desc(rho)) %>% head(15) %>% mutate(rho = fmt(rho, 3)) %>%
+  rename(`|rho|` = rho) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c"),
+        caption = "Tabela 15. Os 15 pares de descritores mais correlacionados") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r correlacao-heatmap, fig.width=7.5, fig.height=7, fig.cap="Figura 4. Correlação de Spearman (valor absoluto) entre os 105 descritores, reordenada por agrupamento hierárquico. Blocos escuros indicam grupos de descritores redundantes."}
+pheatmap::pheatmap(rho_abs, color = colorRampPalette(c("#FFFFFF", "#9CC3C5", "#12343B"))(100),
+                   breaks = seq(0, 1, length.out = 101),
+                   clustering_distance_rows = as.dist(1 - rho_abs), clustering_distance_cols = as.dist(1 - rho_abs),
+                   clustering_method = "average", show_rownames = FALSE, show_colnames = FALSE,
+                   border_color = NA, treeheight_row = 30, treeheight_col = 30)
+```
+
+> `r sum(tab_pares$rho >= 0.9)` pares têm correlação de pelo menos 0,9 e
+> `r sum(tab_pares$rho >= 0.99)`, de pelo menos 0,99, incluindo descritores
+> praticamente idênticos, como Energy e TotalEnergy. É essa redundância que
+> torna o ajuste sem penalização instável e justifica o elastic net.
+
+\
+
+# 5. Métodos
+
+## 5.1 Regressão logística
+
+A regressão logística modela a probabilidade de a lesão ser pulmonar:
+
+$$\log\left(\frac{\pi_i}{1 - \pi_i}\right) = \beta_0 + \sum_{j} \beta_j x_{ij}, \qquad \pi_i = P(y_i = 1 \mid x_i).$$
+
+O modelo devolve, para cada paciente, uma **probabilidade** $\hat{\pi}_i$
+(em R, `predict(..., type = "response")`; em Python, `predict_proba`). Uma
+probabilidade de 0,7 significa que, para um paciente com aqueles valores dos
+descritores, o modelo estima em 70 % a probabilidade de a lesão ser pulmonar.
+Para transformar a probabilidade numa classificação, compara-se com um
+**limiar** $t$: a lesão é classificada como pulmonar se $\hat{\pi}_i \geq t$.
+O limiar usual é 0,5 (o `predict` do Python), mas ele não é necessariamente
+o melhor para a métrica de interesse.
+
+## 5.2 Penalização elastic net
+
+Com 105 descritores e `r n` pacientes de treino, a regressão logística comum não é
+estimável de forma estável. O elastic net (Zou e Hastie, 2005) acrescenta à
+verossimilhança uma penalização sobre os coeficientes:
+
+$$\hat{\beta} = \arg\min_{\beta} \left\{ -\frac{1}{n}\ell(\beta) + \lambda \left[ \alpha \sum_j |\beta_j| + \frac{1 - \alpha}{2} \sum_j \beta_j^2 \right] \right\}.$$
+
+O parâmetro $\lambda \geq 0$ controla a força da penalização, e
+$\alpha \in [0, 1]$ mistura as duas penalidades: $\alpha = 1$ é o LASSO, que
+zera coeficientes e seleciona variáveis, e $\alpha = 0$ é o ridge, que encolhe
+todos os coeficientes sem zerá-los. O elastic net é indicado quando há grupos
+de variáveis fortemente correlacionadas, como na radiômica. A estimação usa o
+pacote `glmnet` (Friedman, Hastie e Tibshirani, 2010), que padroniza os
+descritores internamente.
+
+## 5.3 Métricas
+
+Tomando o pulmão como classe positiva, com verdadeiros positivos (VP), falsos
+positivos (FP), falsos negativos (FN) e verdadeiros negativos (VN):
+
+$$\text{Precisão} = \frac{VP}{VP + FP}, \qquad \text{Recall} = \frac{VP}{VP + FN}, \qquad \text{Acurácia} = \frac{VP + VN}{n}.$$
+
+O **F-beta score** combina precisão e recall numa média harmônica ponderada:
+
+$$F_\beta = \frac{(1 + \beta^2)\,\text{Precisão} \cdot \text{Recall}}{\beta^2\,\text{Precisão} + \text{Recall}}.$$
+
+Com $\beta = 1$, obtém-se o **F1-score**, que dá o mesmo peso à precisão e ao
+recall e é a métrica principal deste trabalho. Valores de $\beta$ maiores que
+1, como o F2, dão mais peso ao recall e, portanto, penalizam mais os falsos
+negativos; valores menores, como o F0,5, dão mais peso à precisão. A AUC, que
+não depende de limiar, é reportada como medida complementar de
+discriminação.
+
+Completam a avaliação a curva ROC, a calibração das probabilidades, resumida
+pelo escore de Brier (Brier, 1950) e pelo intercepto e pela inclinação de
+calibração (Van Calster et al., 2019), e uma análise de sensibilidade ao
+critério de escolha do limiar, comparando o F1 com o F2, a acurácia balanceada
+e o limiar fixo de 0,5 (Seções 7.4 e 7.5).
+
+### Consequências clínicas de cada erro e a escolha da métrica
+
+Os dois erros de classificação não têm o mesmo peso clínico, porque o
+tratamento cirúrgico dos dois tumores é diferente. No adenocarcinoma pulmonar
+primário, o padrão é a ressecção anatômica, em geral a lobectomia, com
+dissecção dos linfonodos do mediastino; nas metástases pulmonares de câncer
+colorretal, prefere-se uma ressecção menor, que preserve o tecido pulmonar
+para eventuais novas operações, e a terapia sistêmica é o pilar do tratamento
+(Lee, Jeong e Kim, 2021; Losekann, 2026).
+
+| | Câncer de pulmão classificado como metástase (falso negativo) | Metástase classificada como câncer de pulmão (falso positivo) |
+|---|---|---|
+| Na cirurgia | ressecção pequena, sem retirada dos linfonodos | ressecção maior que o necessário, com retirada dos linfonodos |
+| Tipo de erro | **subtratamento** | **sobretratamento** |
+| Consequência para o câncer | tratamento oncológico e estadiamento incompletos | o tumor é retirado com margem de sobra |
+| Tratamento complementar | pode deixar de receber quimioterapia, terapia-alvo ou imunoterapia indicadas | nenhum tratamento é perdido |
+| Chance de cura | **comprometida**, num tumor potencialmente curável | preservada |
+| Principal custo | risco à sobrevida | perda de tecido pulmonar e cirurgia mais agressiva |
+| Gravidade | **maior** | **menor** |
+
+O falso negativo é, portanto, o erro mais grave: compromete o tratamento com
+intenção curativa de um câncer primário, enquanto o falso positivo leva a um
+tratamento mais amplo que o necessário, sem prejudicar o controle do tumor. A
+relevância do problema é reforçada pelo achado de cânceres de pulmão primários
+em parcela significativa de pacientes operados com a intenção de retirar
+metástases (Karjula et al., 2023).
+
+Essa assimetria orienta a escolha da métrica. O F1-score, com o pulmão como
+classe positiva, privilegia o reconhecimento das lesões pulmonares, e o limiar
+escolhido por ele tende a reduzir os falsos negativos à custa de mais falsos
+positivos, o que é coerente com a prioridade clínica. O F1 não pondera
+explicitamente esses custos: ele favorece a classe positiva por não considerar
+os verdadeiros negativos, e seu comportamento depende da proporção de cada
+diagnóstico na amostra. Por isso, a escolha é acompanhada de uma análise de
+sensibilidade com outros critérios de limiar (Seção 7.5), incluindo o F2, que
+dá peso explícito ao recall, e o limiar fixo de 0,5, mais equilibrado.
+
+Na prática, o modelo é um instrumento de apoio ao planejamento, e não substitui
+a confirmação histológica: diante de uma lesão duvidosa, a congelação
+intraoperatória permite iniciar com uma ressecção em cunha e ampliá-la para
+uma ressecção anatômica se o tumor for primário. Nesse contexto, classificar
+como pulmonares parte das metástases é um custo aceitável para não deixar de
+reconhecer os cânceres de pulmão.
+
+## 5.4 Validação cruzada aninhada
+
+O desempenho é estimado por validação cruzada com `r N_FOLDS` folds,
+estratificados pelo diagnóstico, repetida `r N_SEEDS` vezes, o que produz
+`r N_SEEDS * N_FOLDS` estimativas de cada métrica. Em cada fold externo, todas
+as escolhas são feitas apenas com os pacientes de treino, por meio de uma
+validação cruzada interna de `r N_FOLDS_I` folds, **repetida `r N_REP_I` vezes**
+com divisões diferentes. Com cerca de 77 pacientes no treino, uma única divisão
+interna torna a escolha dos hiperparâmetros instável; a média sobre várias
+repetições reduz essa variação (Krstajic et al., 2014):
+
+1. **Pré-processamento:** descritores estritamente positivos com assimetria
+   acima de 1 no treino recebem transformação logarítmica.
+2. **Hiperparâmetros do elastic net:** para cada $\alpha$ da grade
+   (`r paste(fmt(range(GRADE_ALFA), 1), collapse = " a ")`, de 0,1 em 0,1), o
+   `glmnet` gera um caminho de 50 valores de $\lambda$ no treino; a desviância
+   de cada $\lambda$ é calculada em cada repetição da validação interna e
+   resumida pela média. Fica o par $(\alpha, \lambda)$ de menor desviância
+   média.
+3. **Limiar:** com as probabilidades de cada repetição da validação interna,
+   calcula-se o F1 para cada limiar da grade de 0 a 1, de 0,01 em 0,01, e
+   escolhe-se o de maior F1 médio entre as repetições (em caso de empate, o
+   menor, que favorece o recall).
+4. **Avaliação:** o modelo é reajustado com todo o treino do fold e aplicado
+   aos pacientes de validação do fold, com o limiar escolhido.
+
+Assim, nenhuma informação dos pacientes de validação de cada fold é usada para
+escolher o modelo, os hiperparâmetros ou o limiar. Toda essa validação cruzada
+usa apenas o conjunto de treino: ela serve para comparar e escolher os
+modelos, e as medidas de desempenho finais vêm do conjunto de teste
+(Seção 13).
+
+## 5.5 Comparação dos modelos
+
+Os dois modelos são avaliados nos mesmos folds, de modo que cada fold produz
+um par de valores de cada métrica. As distribuições são comparadas por dois
+testes pareados sobre as `r N_SEEDS * N_FOLDS` diferenças $d_j$:
+
+- **Teste de Wilcoxon pareado**, não paramétrico, que avalia se a diferença
+  típica entre os modelos é zero.
+- **Teste t corrigido de Nadeau e Bengio (2003).** Na validação cruzada
+  repetida, os conjuntos de treino compartilham pacientes, e as diferenças
+  entre folds não são independentes; o teste t comum subestima a variância e
+  produz p-valores pequenos demais. A correção infla a variância:
+
+$$t = \frac{\bar{d}}{\sqrt{\left(\dfrac{1}{J} + \dfrac{n_{\text{teste}}}{n_{\text{treino}}}\right) s_d^2}}, \qquad J = `r N_SEEDS * N_FOLDS`,$$
+
+com $J - 1$ graus de liberdade, em que $n_{\text{teste}}/n_{\text{treino}} = 1/(K-1)$.
+
+\
+
+# 6. Ajuste dos modelos
+
+```{r funcoes}
+metricas <- function(yy, prob, t) {
+  pr <- as.integer(prob >= t)
+  vp <- sum(yy == 1 & pr == 1); fp <- sum(yy == 0 & pr == 1)
+  fn <- sum(yy == 1 & pr == 0); vn <- sum(yy == 0 & pr == 0)
+  prec <- if (vp + fp > 0) vp / (vp + fp) else 0
+  rec  <- vp / (vp + fn)
+  c(F1 = if (prec + rec > 0) 2 * prec * rec / (prec + rec) else 0,
+    Acurácia = (vp + vn) / length(yy), Precisão = prec, Recall = rec,
+    Especificidade = vn / (vn + fp), VP = vp, FP = fp, FN = fn, VN = vn)
+}
+limiar_f1 <- function(yy, prob) {
+  f <- sapply(GRADE_LIMIAR, function(t) metricas(yy, prob, t)["F1"])
+  GRADE_LIMIAR[which.max(f)]
+}
+auc_de <- function(yy, prob) as.numeric(auc(roc(yy, prob, direction = "<", levels = c(0, 1), quiet = TRUE)))
+
+prep_log <- function(Xtr, Xte) {
+  usa <- apply(Xtr, 2, function(v) all(v > 0) && abs(assim(v)) > 1)
+  for (j in which(usa)) {
+    piso <- min(Xtr[, j]) / 2
+    Xtr[, j] <- log(Xtr[, j]); Xte[, j] <- log(pmax(Xte[, j], piso))
+  }
+  list(tr = Xtr, te = Xte)
+}
+
+# Limiar: maior F1 médio nas repetições da validação interna
+limiar_f1_rep <- function(yy, oof_lista) {
+  f <- sapply(GRADE_LIMIAR, function(t) mean(sapply(oof_lista, function(o) metricas(yy, o, t)["F1"])))
+  GRADE_LIMIAR[which.max(f)]
+}
+
+# Limiar por outros critérios (Seção 7.5), nas mesmas previsões da validação interna
+limiar_crit <- function(yy, oof_lista, crit) {
+  if (crit == "Limiar fixo de 0,5") return(0.5)
+  nota <- function(o, t) { m <- metricas(yy, o, t)
+    vp <- m[["VP"]]; fp <- m[["FP"]]; fn <- m[["FN"]]; vn <- m[["VN"]]
+    pr <- if (vp + fp > 0) vp / (vp + fp) else 0; rc <- vp / (vp + fn)
+    switch(crit,
+           "F1" = m[["F1"]],
+           "F2" = if (pr + rc > 0) 5 * pr * rc / (4 * pr + rc) else 0,
+           "Acurácia balanceada" = (rc + vn / (vn + fp)) / 2) }
+  f <- sapply(GRADE_LIMIAR, function(t) mean(sapply(oof_lista, function(o) nota(o, t))))
+  GRADE_LIMIAR[which.max(f)]
+}
+
+# Modelo base: esfericidade
+ajusta_base <- function(tr, te, folds_rep) {
+  oof_lista <- lapply(folds_rep, function(folds_i) {
+    oof <- numeric(length(tr))
+    for (fi in folds_i) {
+      ti <- setdiff(seq_along(tr), fi)
+      m <- glm(y[tr][ti] ~ esf[tr][ti], family = binomial)
+      oof[fi] <- plogis(coef(m)[1] + coef(m)[2] * esf[tr][fi])
+    }
+    oof
+  })
+  t <- limiar_f1_rep(y[tr], oof_lista)
+  m <- glm(y[tr] ~ esf[tr], family = binomial)
+  list(prob = plogis(coef(m)[1] + coef(m)[2] * esf[te]), limiar = t, oof = oof_lista)
+}
+
+# Modelo completo: elastic net com os 105 descritores
+# Para cada alfa, a desviância de cada lambda é a média das N_REP_I repetições
+# da validação interna, sempre sobre o mesmo caminho de lambdas.
+ajusta_enet <- function(tr, te, folds_rep) {
+  pp <- prep_log(X[tr, ], X[te, , drop = FALSE])
+  foldids <- lapply(folds_rep, function(fl) { f <- integer(length(tr)); for (k in seq_along(fl)) f[fl[[k]]] <- k; f })
+  por_alfa <- lapply(GRADE_ALFA, function(a) {
+    lam <- glmnet(pp$tr, y[tr], family = "binomial", alpha = a, nlambda = 50)$lambda
+    cvs <- lapply(foldids, function(fid) cv.glmnet(pp$tr, y[tr], family = "binomial", alpha = a,
+                                                   lambda = lam, foldid = fid,
+                                                   type.measure = "deviance", keep = TRUE))
+    L <- min(sapply(cvs, function(cv) length(cv$cvm)))
+    dev <- colMeans(do.call(rbind, lapply(cvs, function(cv) cv$cvm[1:L])))
+    k <- which.min(dev)
+    list(lam = lam[1:L], k = k, dev = dev[k], dev_nulo = dev[1],
+         oof = lapply(cvs, function(cv) plogis(cv$fit.preval[, k])))
+  })
+  melhor <- which.min(sapply(por_alfa, `[[`, "dev"))
+  pa <- por_alfa[[melhor]]; a <- GRADE_ALFA[melhor]; lam_star <- pa$lam[pa$k]
+  t <- limiar_f1_rep(y[tr], pa$oof)
+  fit <- glmnet(pp$tr, y[tr], family = "binomial", alpha = a, lambda = pa$lam)
+  cf <- as.matrix(coef(fit, s = lam_star))[-1, 1]
+  list(prob = as.numeric(predict(fit, newx = pp$te, s = lam_star, type = "response")),
+       limiar = t, oof = pa$oof, alfa = a, lambda = lam_star, sel = cf != 0,
+       borda = if (pa$k == 1) "maior lambda do caminho" else if (pa$k == length(pa$lam)) "menor lambda do caminho" else "interior",
+       dev = pa$dev, dev_nulo = pa$dev_nulo)
+}
+```
+
+```{r validacao, cache=TRUE, cache.extra=list(X, y, N_SEEDS, N_FOLDS, N_FOLDS_I, N_REP_I, GRADE_LIMIAR, GRADE_ALFA, CRITERIOS_LIMIAR)}
+res <- list(); sel_mat <- NULL; hp <- NULL; preds <- list(); sens_res <- list()
+for (s in seq_len(N_SEEDS)) {
+  set.seed(1000 + s)
+  folds <- createFolds(factor(y), k = N_FOLDS, list = TRUE)
+  for (f in seq_along(folds)) {
+    te <- folds[[f]]; tr <- setdiff(seq_len(n), te)
+    folds_rep <- lapply(seq_len(N_REP_I), function(r) {
+      set.seed(2000 + 100 * s + 10 * f + r)
+      createFolds(factor(y[tr]), k = N_FOLDS_I, list = TRUE)
+    })
+    b <- ajusta_base(tr, te, folds_rep)
+    e <- ajusta_enet(tr, te, folds_rep)
+    for (mod in c("base", "enet")) {
+      o <- if (mod == "base") b else e
+      res[[length(res) + 1]] <- data.frame(semente = s, fold = f, modelo = mod, limiar = o$limiar,
+        t(metricas(y[te], o$prob, o$limiar)), AUC = auc_de(y[te], o$prob), check.names = FALSE)
+      preds[[length(preds) + 1]] <- data.frame(semente = s, fold = f, modelo = mod, paciente = te, prob = o$prob, y = y[te])
+      for (cr in CRITERIOS_LIMIAR) {          # Seção 7.5: o mesmo modelo, outros critérios de limiar
+        tc <- limiar_crit(y[tr], o$oof, cr); mm <- metricas(y[te], o$prob, tc)
+        sens_res[[length(sens_res) + 1]] <- data.frame(semente = s, fold = f, modelo = mod, criterio = cr, limiar = tc,
+          F1 = mm[["F1"]], Recall = mm[["Recall"]], Especificidade = mm[["Especificidade"]],
+          AcBal = (mm[["Recall"]] + mm[["Especificidade"]]) / 2)
+      }
+    }
+    sel_mat <- rbind(sel_mat, e$sel)
+    hp <- rbind(hp, data.frame(alfa = e$alfa, lambda = e$lambda, n_sel = sum(e$sel),
+                               borda = e$borda, dev = e$dev, dev_nulo = e$dev_nulo))
+  }
+}
+res <- do.call(rbind, res)
+preds <- do.call(rbind, preds); sens_res <- do.call(rbind, sens_res)
+preds$modelo <- factor(ifelse(preds$modelo == "base", "Modelo base (esfericidade)",
+                              "Modelo completo (elastic net, 105 descritores)"),
+                       levels = c("Modelo base (esfericidade)", "Modelo completo (elastic net, 105 descritores)"))
+res$modelo <- factor(ifelse(res$modelo == "base", "Modelo base (esfericidade)",
+                            "Modelo completo (elastic net, 105 descritores)"),
+                     levels = c("Modelo base (esfericidade)", "Modelo completo (elastic net, 105 descritores)"))
+cat("Ajustes:", nrow(res) / 2, "folds por modelo\n")
+```
+
+## 6.1 Modelo base ajustado com o conjunto de treino
+
+Para interpretar os coeficientes, o modelo base é ajustado com todos os
+pacientes de treino.
+
+```{r base-completa}
+fit_base <- glm(y ~ esf, family = binomial)
+cf <- summary(fit_base)$coefficients; ic <- confint.default(fit_base)["esf", ]
+rc <- exp(-0.1 * cf["esf", 1]); ic_rc <- sort(exp(-0.1 * ic))
+data.frame(Termo = c("Intercepto", "Esfericidade"),
+           Coeficiente = round(cf[, 1], 3),
+           `Razão de chances (0,1 a menos de esfericidade)` = c("", sprintf("%.2f [%.2f; %.2f]", rc, ic_rc[1], ic_rc[2])),
+           `p-valor` = format.pval(cf[, 4], digits = 2, eps = .001), check.names = FALSE, row.names = NULL) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+        caption = "Tabela 16. Regressão logística do modelo base (amostra completa)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> Cada redução de 0,1 na esfericidade multiplica a chance de a lesão ser
+> pulmonar por `r fmt(rc, 2)`: lesões menos esféricas, com bordas mais
+> irregulares, são mais associadas ao adenocarcinoma pulmonar.
+
+### Como é a esfericidade: radiômica inversa
+
+Valores de esfericidade são pouco intuitivos. Para visualizar o que eles
+significam, faz-se o caminho inverso da radiômica: em vez de extrair os
+descritores de uma imagem, constrói-se uma lesão sintética que **reproduz os
+descritores de forma de pacientes reais do estudo**, seguindo a ideia de
+modelos de tumor com espiculação controlada de Limkin et al. (2019).
+
+Foram escolhidos quatro pacientes: em cada diagnóstico, o mais próximo da
+esfericidade mediana e o mais próximo do quartil mais extremo (o 3.º quartil
+nos colorretais, mais regulares, e o 1.º nos pulmonares, mais irregulares),
+ambos com volume próximo da mediana do grupo. Para cada um, o script
+`radiomica_inversa_pacientes.py`:
+
+1. parte de um elipsoide com os três eixos principais do paciente
+   (`MajorAxisLength`, `MinorAxisLength` e `LeastAxisLength`);
+2. acrescenta uma irregularidade de superfície, com lobulações nas lesões
+   colorretais e lobulações e espículas nas pulmonares, cuja intensidade é
+   ajustada até a esfericidade coincidir com a do paciente;
+3. mantém o volume do paciente, com voxels de 1 mm, e corrige os eixos,
+   alternando os ajustes; a esfericidade é calculada pela malha de superfície
+   (*marching cubes*; Lorensen e Cline, 1987), como no PyRadiomics, com a
+   biblioteca scikit-image (van der Walt et al., 2014).
+
+A figura foi gerada antes da separação entre treino e teste, com os 96
+pacientes, e tem caráter apenas ilustrativo: não entra em nenhuma análise nem
+medida de desempenho. A figura é uma representação visual: a forma exata da
+borda é hipotética, e o
+que se reproduz são os descritores de forma, e não a imagem original do
+paciente. Ela mostra, com as dimensões reais de cada grupo, o que a diferença
+de esfericidade representa: contornos compactos e lobulados nas metástases
+colorretais e projeções irregulares nas lesões pulmonares.
+
+```{r radiomica-inversa-fig, echo=FALSE, out.width="100%", fig.cap="Figura 5. Radiômica inversa: lesões reconstruídas a partir dos descritores de forma de quatro pacientes do estudo. Linha superior: forma tridimensional; linha inferior: corte axial de maior área, em voxels de 1 mm."}
+arq_png <- "radiomica_inversa_pacientes.png"
+if (file.exists(arq_png)) knitr::include_graphics(arq_png) else
+  cat("Figura não encontrada: execute radiomica_inversa_pacientes.py na pasta do projeto.")
+```
+
+## 6.2 Hiperparâmetros escolhidos
+
+```{r hiperparametros}
+lim_tab <- res %>% group_by(Modelo = modelo) %>%
+  summarise(`Limiar mediano` = fmt(median(limiar), 2),
+            `Limiar (mín. a máx.)` = sprintf("%s a %s", fmt(min(limiar), 2), fmt(max(limiar), 2)), .groups = "drop")
+kable(lim_tab, format = "html", align = c("l", "c", "c"),
+      caption = "Tabela 17. Limiar de probabilidade escolhido no treino de cada fold") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+data.frame(Alfa = fmt(as.numeric(names(table(hp$alfa))), 1), Folds = as.integer(table(hp$alfa))) %>%
+  kable(format = "html", align = "c",
+        caption = sprintf("Tabela 18. Alfa do elastic net escolhido nos %d folds (descritores mantidos: mediana de %d)",
+                          nrow(hp), as.integer(median(hp$n_sel)))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r diag-lambda}
+data.frame(
+  Medida = c("Lambda escolhido: mediana (mín. a máx.)",
+             "Lambda no maior valor do caminho (modelo quase nulo)",
+             "Lambda no menor valor do caminho (penalização mínima testada)",
+             "Lambda no interior do caminho",
+             "Descritores mantidos: mediana (mín. a máx.)",
+             "Folds sem nenhum descritor mantido",
+             "Desviância interna: modelo escolhido contra o mais penalizado (medianas)"),
+  Valor = c(sprintf("%s (%s a %s)", formatC(median(hp$lambda), format = "g", digits = 3, decimal.mark = ","),
+                    formatC(min(hp$lambda), format = "g", digits = 3, decimal.mark = ","),
+                    formatC(max(hp$lambda), format = "g", digits = 3, decimal.mark = ",")),
+            sprintf("%d de %d folds", sum(hp$borda == "maior lambda do caminho"), nrow(hp)),
+            sprintf("%d de %d folds", sum(hp$borda == "menor lambda do caminho"), nrow(hp)),
+            sprintf("%d de %d folds", sum(hp$borda == "interior"), nrow(hp)),
+            sprintf("%d (%d a %d)", as.integer(median(hp$n_sel)), min(hp$n_sel), max(hp$n_sel)),
+            sprintf("%d de %d folds", sum(hp$n_sel == 0), nrow(hp)),
+            sprintf("%s contra %s", fmt(median(hp$dev)), fmt(median(hp$dev_nulo))))) %>%
+  kable(format = "html", align = c("l", "c"),
+        caption = "Tabela 19. Diagnóstico da escolha do lambda do elastic net nos folds externos") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> Se o $\lambda$ escolhido caísse com frequência no maior valor do caminho, o
+> modelo estaria praticamente sem descritores, sinal de que os dados não
+> sustentam nenhuma variável; se caísse no menor, o caminho testado seria
+> estreito demais. A tabela mostra onde as escolhas ficaram e quanto a
+> desviância do modelo escolhido melhora em relação ao modelo mais penalizado.
+
+```{r selecionados}
+data.frame(Descritor = nome(feat), Família = familia,
+           `Frequência de seleção` = colMeans(sel_mat), check.names = FALSE) %>%
+  arrange(desc(`Frequência de seleção`)) %>% head(12) %>%
+  mutate(`Frequência de seleção` = pct(`Frequência de seleção`)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c"),
+        caption = sprintf("Tabela 20. Descritores mais mantidos pelo elastic net (coeficiente diferente de zero) nos %d folds", nrow(sel_mat))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+freq_sel <- colMeans(sel_mat)
+conj <- apply(sel_mat, 1, function(r) paste(sort(nome(feat[r])), collapse = "; "))
+tab_conj <- sort(table(conj), decreasing = TRUE)
+```
+
+> **Resumo da seleção.** `r sum(freq_sel >= 0.5)` descritores foram mantidos em
+> pelo menos metade dos folds: `r paste(nome(feat[freq_sel >= 0.5]), collapse = ", ")`.
+> O conjunto de descritores mais frequente apareceu em
+> `r max(tab_conj)` dos `r nrow(sel_mat)` folds (`r pct(max(tab_conj) / nrow(sel_mat))`),
+> e houve `r length(tab_conj)` conjuntos diferentes ao todo: a seleção exata
+> muda de um fold para outro, ainda que os descritores mais importantes se
+> repitam.
+
+\
+
+# 7. Resultados
+
+## 7.1 Distribuição das métricas
+
+```{r resumo-metricas}
+resumo <- function(v) sprintf("%s [%s; %s]", fmt(median(v)), fmt(quantile(v, .25)), fmt(quantile(v, .75)))
+res %>% group_by(Modelo = modelo) %>%
+  summarise(`F1` = resumo(F1), Acurácia = resumo(Acurácia), AUC = resumo(AUC),
+            Recall = resumo(Recall), Precisão = resumo(Precisão), .groups = "drop") %>%
+  kable(format = "html", align = c("l", rep("c", 5)),
+        caption = sprintf("Tabela 21. Mediana [1.º; 3.º quartil] das métricas nos %d folds de validação", nrow(res) / 2)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  column_spec(2, bold = TRUE)
+```
+
+```{r fig-metricas, fig.width=9, fig.height=4, fig.cap="Figura 6. Distribuição do F1, da acurácia e da AUC nos folds de validação. Cada linha cinza liga os dois modelos no mesmo fold."}
+res %>% mutate(par = paste(semente, fold)) %>%
+  tidyr::pivot_longer(c(F1, Acurácia, AUC), names_to = "metrica", values_to = "valor") %>%
+  mutate(metrica = factor(metrica, c("F1", "Acurácia", "AUC")),
+         mod_curto = ifelse(grepl("base", modelo), "Base", "Completo")) %>%
+  ggplot(aes(mod_curto, valor)) +
+  geom_line(aes(group = par), colour = "grey85") +
+  geom_boxplot(aes(fill = mod_curto), width = .45, alpha = .5, outlier.shape = NA) +
+  geom_jitter(width = .06, height = 0, size = 1, alpha = .5) +
+  facet_wrap(~ metrica) +
+  scale_fill_manual(values = c("Base" = "#2A7F84", "Completo" = "#E07A5F"), guide = "none") +
+  labs(x = NULL, y = NULL) + theme_minimal(base_size = 11)
+```
+
+## 7.2 Matriz de confusão
+
+```{r confusao}
+mc <- res %>% group_by(modelo) %>%
+  summarise(VN = sum(VN) / N_SEEDS, FP = sum(FP) / N_SEEDS, FN = sum(FN) / N_SEEDS, VP = sum(VP) / N_SEEDS, .groups = "drop")
+do.call(rbind, lapply(seq_len(nrow(mc)), function(i) data.frame(
+  Modelo = c(as.character(mc$modelo[i]), ""),
+  `Diagnóstico real` = c("Colorretal", "Pulmão"),
+  `Classificado como colorretal` = fmt(c(mc$VN[i], mc$FN[i]), 1),
+  `Classificado como pulmão` = fmt(c(mc$FP[i], mc$VP[i]), 1), check.names = FALSE))) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c"),
+        caption = sprintf("Tabela 22. Matriz de confusão média por repetição (%d pacientes; previsões de validação)", n)) %>%
+  kable_styling(bootstrap_options = c("condensed", "bordered"), full_width = FALSE)
+```
+
+```{r confusao-medidas}
+mc %>%
+  transmute(Modelo = modelo,
+            `Recall (pulmões reconhecidos)` = pct(VP / (VP + FN)),
+            `Especificidade (colorretais reconhecidos)` = pct(VN / (VN + FP)),
+            `VPP (acerto quando diz pulmão)` = pct(VP / (VP + FP)),
+            `VPN (acerto quando diz colorretal)` = pct(VN / (VN + FN)),
+            Acurácia = pct((VP + VN) / n)) %>%
+  kable(format = "html", align = c("l", rep("c", 5)),
+        caption = "Tabela 23. Medidas derivadas da matriz de confusão média por repetição") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> Estas medidas resumem a matriz média; por isso diferem um pouco das medianas
+> por fold da Tabela 21. Os dois modelos reconhecem quase todos os pacientes
+> pulmonares, mas classificam como pulmonares cerca de metade dos colorretais,
+> efeito do limiar escolhido pelo F1, que não considera os verdadeiros
+> negativos.
+
+## 7.3 Testes de comparação
+
+```{r testes}
+nb_test <- function(d, J, razao) {
+  tt <- mean(d) / sqrt((1 / J + razao) * var(d))
+  2 * pt(-abs(tt), df = J - 1)
+}
+J <- nrow(res) / 2; razao <- 1 / (N_FOLDS - 1)
+base_r <- res[grepl("base", res$modelo), ]; enet_r <- res[!grepl("base", res$modelo), ]
+stopifnot(all(base_r$semente == enet_r$semente), all(base_r$fold == enet_r$fold))
+
+tab_testes <- do.call(rbind, lapply(c("F1", "Acurácia", "AUC"), function(mt) {
+  d <- enet_r[[mt]] - base_r[[mt]]
+  data.frame(Métrica = mt,
+             `Diferença mediana (completo menos base)` = fmt(median(d)),
+             `Diferença média` = fmt(mean(d)),
+             `Folds em que o completo supera` = sprintf("%d de %d", sum(d > 0), J),
+             `p (Wilcoxon pareado)` = format.pval(suppressWarnings(wilcox.test(d, exact = FALSE)$p.value), digits = 2, eps = .001),
+             `p (Nadeau e Bengio)` = format.pval(nb_test(d, J, razao), digits = 2, eps = .001),
+             check.names = FALSE)
+}))
+kable(tab_testes, format = "html", row.names = FALSE, align = c("l", rep("c", 5)),
+      caption = "Tabela 24. Comparação pareada entre o modelo completo e o modelo base") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r testes-texto, echo=FALSE}
+d_f1 <- enet_r$F1 - base_r$F1
+p_nb_f1 <- nb_test(d_f1, J, razao)
+```
+
+> No F1, a diferença mediana entre o modelo completo e o modelo base é de
+> `r fmt(median(d_f1))`, e o teste corrigido de Nadeau e Bengio dá
+> p = `r fmt(p_nb_f1)`. `r if (p_nb_f1 >= 0.05) "Não há evidência de que o modelo com os 105 descritores supere o modelo com uma única variável de forma: com estes dados, os dois têm desempenho equivalente." else if (mean(d_f1) > 0) "O modelo completo supera o modelo base de forma significativa." else "O modelo base supera o modelo completo de forma significativa."`
+> O teste de Wilcoxon, que não corrige a dependência entre os folds, tende a
+> produzir p-valores menores e deve ser lido com cautela.
+
+\
+
+## 7.4 Curvas ROC e calibração
+
+A curva ROC mostra, para todos os limiares possíveis, a sensibilidade (recall)
+contra 1 menos a especificidade. Em cada repetição da validação cruzada, cada
+paciente de treino recebe uma probabilidade de validação, e a curva é
+calculada com essas probabilidades; as 10 curvas de cada modelo aparecem
+sobrepostas. O ponto marca a sensibilidade e a especificidade médias obtidas
+com o limiar escolhido pelo F1.
+
+```{r roc-funcoes}
+curvas_roc <- function(pp) {
+  do.call(rbind, lapply(split(pp, list(pp$modelo, pp$semente), drop = TRUE), function(d) {
+    r <- roc(d$y, d$prob, direction = "<", levels = c(0, 1), quiet = TRUE)
+    data.frame(modelo = d$modelo[1], semente = d$semente[1],
+               fpr = 1 - r$specificities, tpr = r$sensitivities, auc = as.numeric(auc(r)))
+  }))
+}
+grafico_roc <- function(cr, pontos, cores) {
+  rot <- cr %>% group_by(modelo) %>% summarise(a = median(auc[!duplicated(semente)]), .groups = "drop")
+  rotulos <- setNames(sprintf("%s (AUC mediana por repetição: %s)", rot$modelo, fmt(rot$a)), rot$modelo)
+  ggplot(cr, aes(fpr, tpr, colour = modelo)) +
+    geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey60") +
+    geom_path(aes(group = interaction(modelo, semente)), alpha = .35) +
+    geom_point(data = pontos, aes(fpr, tpr, fill = modelo), shape = 21, size = 3.5, colour = "black") +
+    scale_colour_manual(values = cores, labels = rotulos, name = NULL) +
+    scale_fill_manual(values = cores, guide = "none") +
+    coord_equal() + labs(x = "1 - especificidade", y = "Sensibilidade (recall)") +
+    theme_minimal(base_size = 11) + theme(legend.position = "bottom", legend.direction = "vertical")
+}
+cores_mod <- c("Modelo base (esfericidade)" = "#2A7F84", "Modelo completo (elastic net, 105 descritores)" = "#E07A5F")
+```
+
+```{r roc-base-enet, fig.width=6.5, fig.height=6.5, fig.cap="Figura 7. Curvas ROC da validação cruzada (uma por repetição) do modelo base e do modelo completo. Os pontos indicam a sensibilidade e a especificidade médias com o limiar escolhido pelo F1."}
+cr7 <- curvas_roc(preds)
+pts7 <- res %>% group_by(modelo) %>% summarise(fpr = 1 - mean(Especificidade), tpr = mean(Recall), .groups = "drop")
+grafico_roc(cr7, pts7, cores_mod)
+```
+
+A **calibração** verifica se as probabilidades estimadas correspondem às
+frequências observadas: entre os pacientes com probabilidade estimada de
+cerca de 70 %, cerca de 70 % deveriam ser pulmonares. Os pacientes são
+agrupados em cinco faixas de probabilidade estimada, e compara-se a
+probabilidade média de cada faixa com a proporção observada de pulmonares
+(Van Calster et al., 2019). O escore de Brier (Brier, 1950), a média do
+quadrado da diferença entre a probabilidade estimada e o desfecho, resume
+discriminação e calibração (quanto menor, melhor); o intercepto e a inclinação
+de calibração, estimados pela regressão logística do desfecho sobre o logito
+da probabilidade, valem 0 e 1 num modelo perfeitamente calibrado.
+
+```{r calibracao, fig.width=8, fig.height=4.2, fig.cap="Figura 8. Calibração das probabilidades de validação. Cada ponto é uma faixa de probabilidade estimada; as barras indicam o intervalo de 95 % da proporção observada; a linha tracejada é a calibração perfeita."}
+graf_cal <- preds %>% group_by(modelo) %>%
+  mutate(faixa = cut(prob, unique(quantile(prob, seq(0, 1, .2))), include.lowest = TRUE)) %>%
+  group_by(modelo, faixa) %>%
+  summarise(prev = mean(prob), obs = mean(y), m = n(), .groups = "drop") %>%
+  mutate(li = pmax(0, obs - 1.96 * sqrt(obs * (1 - obs) / m)), ls = pmin(1, obs + 1.96 * sqrt(obs * (1 - obs) / m)))
+ggplot(graf_cal, aes(prev, obs, colour = modelo)) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey60") +
+  geom_errorbar(aes(ymin = li, ymax = ls), width = .02) + geom_point(size = 2.5) + geom_line() +
+  facet_wrap(~ modelo) + scale_colour_manual(values = cores_mod, guide = "none") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Probabilidade estimada (média da faixa)", y = "Proporção observada de pulmonares") +
+  theme_minimal(base_size = 11)
+
+cal_tab <- preds %>% group_by(modelo, semente) %>%
+  summarise(brier = mean((prob - y)^2),
+            inter = coef(glm(yv ~ offset(pl), family = binomial,
+                             data = data.frame(yv = y, pl = qlogis(pmin(pmax(prob, 0.001), 0.999)))))[1],
+            incl  = coef(glm(yv ~ pl, family = binomial,
+                             data = data.frame(yv = y, pl = qlogis(pmin(pmax(prob, 0.001), 0.999)))))[2],
+            .groups = "drop") %>%
+  group_by(Modelo = modelo) %>%
+  summarise(`Escore de Brier` = fmt(median(brier)), `Intercepto de calibração` = fmt(median(inter), 2),
+            `Inclinação de calibração` = fmt(median(incl), 2), .groups = "drop")
+kable(cal_tab, format = "html", align = c("l", "c", "c", "c"),
+      caption = "Tabela 25. Medidas de calibração das probabilidades de validação (medianas das 10 repetições)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> Uma inclinação de calibração abaixo de 1 indica probabilidades extremas
+> demais (o modelo exagera a certeza); acima de 1, probabilidades tímidas
+> demais. Um intercepto diferente de 0 indica que o modelo, em média,
+> superestima ou subestima a chance de pulmão.
+
+## 7.5 Sensibilidade ao critério do limiar
+
+O limiar escolhido pelo F1 favorece o reconhecimento das lesões pulmonares,
+porque o F1 não considera os verdadeiros negativos. Para mostrar o custo dessa
+escolha, o limiar foi escolhido também por outros critérios, sempre só com os
+pacientes de treino de cada fold e nas mesmas previsões da validação interna:
+o **F2**, que dá ainda mais peso ao recall; a **acurácia balanceada**, média
+entre a sensibilidade e a especificidade, que dá o mesmo peso aos dois
+diagnósticos; e o **limiar fixo de 0,5**, o padrão de classificadores como o
+`predict` do Python. Nenhum desses critérios usa o conjunto de teste.
+
+```{r sensibilidade-limiar}
+sens_lim <- sens_res %>%
+  mutate(modelo = factor(ifelse(modelo == "base", "Modelo base (esfericidade)", "Modelo completo (elastic net, 105 descritores)"),
+                         levels = names(cores_mod)),
+         criterio = factor(criterio, levels = CRITERIOS_LIMIAR))
+resumo_q <- function(v) sprintf("%s [%s; %s]", fmt(median(v)), fmt(quantile(v, .25)), fmt(quantile(v, .75)))
+sens_lim %>% group_by(Modelo = modelo, `Critério do limiar` = criterio) %>%
+  summarise(`Limiar mediano` = fmt(median(limiar), 2), F1 = resumo_q(F1),
+            Recall = resumo_q(Recall), Especificidade = resumo_q(Especificidade),
+            `Acurácia balanceada` = resumo_q(AcBal), .groups = "drop") %>%
+  kable(format = "html", align = c("l", "l", rep("c", 5)),
+        caption = "Tabela 26. Desempenho na validação cruzada conforme o critério de escolha do limiar: mediana [1.º; 3.º quartil] nos 50 folds") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+```{r sensibilidade-texto, echo=FALSE}
+sl <- sens_lim %>% filter(grepl("base", modelo)) %>% group_by(criterio) %>%
+  summarise(rec = median(Recall), esp = median(Especificidade), f1 = median(F1), lim = median(limiar), .groups = "drop")
+sl_f1 <- sl[sl$criterio == "F1", ]; sl_ab <- sl[sl$criterio == "Acurácia balanceada", ]
+```
+
+> No modelo base, o limiar escolhido pelo F1 (mediana de `r fmt(sl_f1$lim, 2)`)
+> leva a recall mediano de `r pct(sl_f1$rec)` e especificidade de
+> `r pct(sl_f1$esp)`. Escolhendo o limiar pela acurácia balanceada (mediana de
+> `r fmt(sl_ab$lim, 2)`), a especificidade passa a `r pct(sl_ab$esp)`, e o
+> recall, a `r pct(sl_ab$rec)`. A escolha do critério não muda a capacidade do
+> modelo de separar os diagnósticos (a AUC é a mesma): muda apenas o
+> equilíbrio entre os dois tipos de erro, uma decisão que depende do uso
+> clínico pretendido.
+
+\
+
+# 8. Classificando um paciente novo
+
+O modelo base final é ajustado com todos os pacientes de treino, e o limiar é escolhido
+pelo F1 nas predições de uma validação cruzada de `r N_FOLDS` folds na amostra
+completa.
+
+```{r paciente-novo}
+set.seed(SEMENTE)
+folds_f <- createFolds(factor(y), k = N_FOLDS, list = TRUE)
+oof_f <- numeric(n)
+for (fi in folds_f) {
+  ti <- setdiff(seq_len(n), fi); m <- glm(y[ti] ~ esf[ti], family = binomial)
+  oof_f[fi] <- plogis(coef(m)[1] + coef(m)[2] * esf[fi])
+}
+t_final <- limiar_f1(y, oof_f)
+ex <- c(0.50, 0.60, 0.70, 0.80)
+pr <- plogis(coef(fit_base)[1] + coef(fit_base)[2] * ex)
+data.frame(Esfericidade = fmt(ex, 2), `Probabilidade de pulmão` = pct(pr),
+           Classificação = ifelse(pr >= t_final, "Pulmão", "Colorretal"), check.names = FALSE) %>%
+  kable(format = "html", align = "c",
+        caption = sprintf("Tabela 27. Exemplos de classificação pelo modelo base (limiar de %s)", fmt(t_final, 2))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r confusao-final}
+prev_final <- as.integer(fitted(fit_base) >= t_final)
+mf <- table(factor(y, levels = c(0, 1)), factor(prev_final, levels = c(0, 1)))
+corte_esf <- (qlogis(t_final) - coef(fit_base)[1]) / coef(fit_base)[2]
+data.frame(`Diagnóstico real` = c("Colorretal", "Pulmão", "Total"),
+           `Classificado como colorretal` = c(mf["0", "0"], mf["1", "0"], sum(mf[, "0"])),
+           `Classificado como pulmão` = c(mf["0", "1"], mf["1", "1"], sum(mf[, "1"])),
+           Total = c(sum(mf["0", ]), sum(mf["1", ]), n), check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+        caption = sprintf("Tabela 28. Modelo base final aplicado aos %d pacientes (limiar de %s, isto é, esfericidade abaixo de %s: pulmão)",
+                          n, fmt(t_final, 2), fmt(corte_esf, 3))) %>%
+  kable_styling(bootstrap_options = c("condensed", "bordered"), full_width = FALSE) %>%
+  row_spec(3, bold = TRUE) %>% column_spec(1, bold = TRUE)
+```
+
+> Aplicado aos próprios pacientes usados no ajuste, o modelo base reconhece
+> `r mf["1", "1"]` dos `r sum(y == 1)` pulmonares e `r mf["0", "0"]` dos
+> `r sum(y == 0)` colorretais. Por ser avaliada nos mesmos dados do ajuste, esta
+> tabela é otimista; a estimativa para pacientes novos vem do conjunto de
+> teste (Seção 13).
+
+> Para um paciente novo, o modelo calcula a probabilidade de a lesão ser
+> pulmonar a partir da esfericidade. Se essa probabilidade for igual ou maior
+> que o limiar de `r fmt(t_final, 2)`, a lesão é classificada como pulmonar.
+>
+> Pela teoria da decisão, o limiar ótimo para probabilidades bem calibradas é
+> $t = c_{FP} / (c_{FP} + c_{FN})$, em que $c_{FP}$ e $c_{FN}$ são os custos
+> de um falso positivo e de um falso negativo. O limiar de
+> `r fmt(t_final, 2)` equivale, portanto, a considerar que deixar de reconhecer
+> um câncer de pulmão é cerca de `r fmt((1 - t_final) / t_final, 1)` vezes mais
+> grave que classificar uma metástase como pulmonar, uma razão coerente com a
+> assimetria clínica descrita na Seção 5.3, mas que deve ser validada pelo
+> grupo clínico.
+
+\
+
+## 8.1 Painel interativo
+
+O painel abaixo usa o modelo base final. No primeiro quadro, escolha a
+esfericidade de um paciente novo e veja como o modelo chega à probabilidade e à
+classificação. No segundo, mova o limiar e veja como mudam a matriz de confusão
+e as medidas de desempenho nos `r n` pacientes. Ao gerar o relatório, o painel
+também é salvo como arquivo separado, `painel_regressao_logistica.html`, na
+mesma pasta.
+
+```{r painel-html, echo=FALSE, results='asis'}
+# Dados do modelo base final para o painel
+vet_js <- function(v, d = 5) paste0("[", paste(round(v, d), collapse = ","), "]")
+dados_js <- paste0('<script>window.RL_DADOS = {esf:', vet_js(esf), ',y:', vet_js(y, 0),
+                   ',b0:', round(coef(fit_base)[1], 6), ',b1:', round(coef(fit_base)[2], 6),
+                   ',limiar:', t_final, '};</script>')
+
+# Painel (estilo, estrutura e código), usado no relatório e no arquivo separado
+painel_corpo <- r"---[
+<style>
+.rl{border:1px solid #DADFE2;border-radius:10px;padding:14px 16px;margin:14px 0 22px;background:#FBFCFC;font-size:14px;line-height:1.5;color:#1F2A30}
+.rl-t{font-weight:600;font-size:15px;margin:0 0 8px}
+.rl-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:6px 0}
+.rl-lab{font-size:12.5px;color:#5E6B73}
+.rl input[type=range]{width:260px;vertical-align:middle}
+.rl-met{background:#EEF2F3;border-radius:8px;padding:7px 12px;min-width:100px}
+.rl-met .l{font-size:12px;color:#5E6B73}
+.rl-met .v{font-size:19px;font-weight:600}
+.rl-met.d{background:#E3EFEB;border:1.5px solid #2F6B5E}
+.rl-btn{border:1px solid #9AA5AB;background:#fff;border-radius:6px;padding:4px 11px;font-size:13px;cursor:pointer;color:#1F2A30}
+.rl-badge{display:inline-block;border-radius:14px;padding:3px 12px;font-weight:600;font-size:14px}
+.rl-p{background:#FAECE7;color:#8A3B22;border:1px solid #E07A5F}
+.rl-c{background:#E1F5EE;color:#0F5B49;border:1px solid #2A7F84}
+.rl table{border-collapse:collapse;font-size:13.5px}
+.rl td,.rl th{border:1px solid #DADFE2;padding:5px 12px;text-align:center}
+.rl th{background:#EEF2F3}
+.rl-conta{font-family:Consolas,Menlo,monospace;font-size:13px;background:#F4F6F7;border-radius:6px;padding:8px 10px;margin:6px 0;line-height:1.7}
+.rl-note{font-size:12.5px;color:#5E6B73;margin-top:8px}
+</style>
+
+<div class="rl" id="rl">
+  <div class="rl-t">1. Um paciente novo</div>
+  <div class="rl-row"><span class="rl-lab">Esfericidade da lesão</span>
+    <input type="range" id="rlE" min="0.35" max="0.95" step="0.005" value="0.61"><b id="rlEv"></b></div>
+  <div class="rl-conta" id="rlConta"></div>
+  <div class="rl-row">
+    <div class="rl-met d"><div class="l">Probabilidade de pulmão</div><div class="v" id="rlP"></div></div>
+    <div><div class="rl-lab">Classificação</div><span class="rl-badge" id="rlClasse"></span></div>
+  </div>
+
+  <div class="rl-t" style="margin-top:16px">2. O limiar e o desempenho</div>
+  <div class="rl-row"><span class="rl-lab">Limiar de probabilidade</span>
+    <input type="range" id="rlT" min="0" max="1" step="0.01"><b id="rlTv"></b>
+    <button class="rl-btn" id="rlF1">Voltar ao limiar do F1</button></div>
+  <div class="rl-lab" id="rlCorte"></div>
+  <div id="rlSvg"></div>
+  <div class="rl-row" style="align-items:flex-start;gap:20px">
+    <table id="rlTab"></table>
+    <div class="rl-row" style="margin:0">
+      <div class="rl-met"><div class="l">Recall</div><div class="v" id="rlRec"></div></div>
+      <div class="rl-met"><div class="l">Especificidade</div><div class="v" id="rlEsp"></div></div>
+      <div class="rl-met"><div class="l">Precisão (VPP)</div><div class="v" id="rlPrec"></div></div>
+      <div class="rl-met"><div class="l">VPN</div><div class="v" id="rlVpn"></div></div>
+      <div class="rl-met"><div class="l">Acurácia</div><div class="v" id="rlAcc"></div></div>
+      <div class="rl-met d"><div class="l">F1</div><div class="v" id="rlF1v"></div></div>
+    </div>
+  </div>
+  <div class="rl-note">Pontos com contorno escuro são pacientes classificados errado no limiar atual.</div>
+</div>
+
+<script>
+(function () {
+  var D = window.RL_DADOS, n = D.esf.length;
+  function $(id) { return document.getElementById(id); }
+  function f(x, d) { if (!isFinite(x)) return "-"; return x.toFixed(d).replace(".", ","); }
+  function pc(x) { return isFinite(x) ? Math.round(100 * x) + "%" : "-"; }
+  function prob(e) { return 1 / (1 + Math.exp(-(D.b0 + D.b1 * e))); }
+  var pr = D.esf.map(prob);
+  var w = 640, h = 250, m = {l: 44, r: 14, t: 10, b: 32}, x0 = 0.35, x1 = 0.95;
+  function sx(v) { return m.l + (v - x0) / (x1 - x0) * (w - m.l - m.r); }
+  function sy(v) { return h - m.b - v * (h - m.t - m.b); }
+  var s = 7, jit = D.esf.map(function () { s = (s * 1664525 + 1013904223) % 4294967296; return (s / 4294967296 - 0.5) * 0.06; });
+  var curva = "";
+  for (var k = 0; k <= 120; k++) { var e = x0 + (x1 - x0) * k / 120; curva += (k ? "L" : "M") + sx(e).toFixed(1) + "," + sy(prob(e)).toFixed(1); }
+  var eixos = "";
+  [0.4, 0.5, 0.6, 0.7, 0.8, 0.9].forEach(function (v) { eixos += '<text x="' + sx(v) + '" y="' + (h - 14) + '" font-size="11" text-anchor="middle" fill="#5E6B73">' + f(v, 1) + '</text>'; });
+  [0, 0.5, 1].forEach(function (v) { eixos += '<line x1="' + m.l + '" x2="' + (w - m.r) + '" y1="' + sy(v) + '" y2="' + sy(v) + '" stroke="#E4E8EA"></line><text x="' + (m.l - 6) + '" y="' + (sy(v) + 4) + '" font-size="11" text-anchor="end" fill="#5E6B73">' + f(v, 1) + '</text>'; });
+
+  function desenha() {
+    var e = parseFloat($("rlE").value), t = parseFloat($("rlT").value);
+    var esc = D.b0 + D.b1 * e, p = prob(e), cl = p >= t ? 1 : 0;
+    $("rlEv").textContent = f(e, 3); $("rlTv").textContent = f(t, 2);
+    $("rlConta").innerHTML = "escore = " + f(D.b0, 3) + " + (" + f(D.b1, 3) + ") × " + f(e, 3) + " = <b>" + f(esc, 3) + "</b><br>" +
+      "probabilidade = 1 / (1 + e<sup>" + f(-esc, 3) + "</sup>) = <b>" + f(p, 3) + "</b><br>" +
+      "comparação: " + f(p, 3) + (cl ? " ≥ " : " &lt; ") + f(t, 2) + " (limiar) → classe <b>" + cl + "</b>";
+    $("rlP").textContent = pc(p);
+    $("rlClasse").textContent = cl ? "1 · Pulmão" : "0 · Colorretal";
+    $("rlClasse").className = "rl-badge " + (cl ? "rl-p" : "rl-c");
+    var corte = (Math.log(t / (1 - t)) - D.b0) / D.b1;
+    $("rlCorte").textContent = (t > 0 && t < 1) ? "Equivale a classificar como pulmão as lesões com esfericidade abaixo de " + f(corte, 3) + "." :
+      (t <= 0 ? "Com limiar 0, todas as lesões são classificadas como pulmão." : "Com limiar 1, nenhuma lesão é classificada como pulmão.");
+    var vp = 0, fp = 0, fn = 0, vn = 0, pts = "";
+    for (var i = 0; i < n; i++) {
+      var c = pr[i] >= t ? 1 : 0, erro = c !== D.y[i];
+      if (D.y[i] === 1) { if (c) vp++; else fn++; } else { if (c) fp++; else vn++; }
+      var yy = (D.y[i] === 1 ? 0.97 : 0.03) + jit[i];
+      pts += '<circle cx="' + sx(D.esf[i]) + '" cy="' + sy(yy) + '" r="3.6" fill="' + (D.y[i] === 1 ? "#E07A5F" : "#2A7F84") + '" fill-opacity="0.8"' + (erro ? ' stroke="#1F2A30" stroke-width="1.5"' : '') + '></circle>';
+    }
+    var lin = (t > 0 && t < 1 && corte > x0 && corte < x1) ? '<line x1="' + sx(corte) + '" x2="' + sx(corte) + '" y1="' + sy(0) + '" y2="' + sy(1) + '" stroke="#2F6B5E" stroke-dasharray="5 3"></line>' : '';
+    $("rlSvg").innerHTML = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="max-width:' + w + 'px">' + eixos +
+      '<text x="' + ((w + m.l) / 2) + '" y="' + (h - 1) + '" font-size="11.5" text-anchor="middle" fill="#5E6B73">esfericidade (em cima: pulmão; embaixo: colorretal)</text>' +
+      '<line x1="' + m.l + '" x2="' + (w - m.r) + '" y1="' + sy(t) + '" y2="' + sy(t) + '" stroke="#C8603F" stroke-dasharray="5 3"></line>' + lin + pts +
+      '<path d="' + curva + '" fill="none" stroke="#1F2A30" stroke-width="2"></path>' +
+      '<circle cx="' + sx(e) + '" cy="' + sy(p) + '" r="6.5" fill="#F2C14E" stroke="#1F2A30" stroke-width="1.2"></circle></svg>';
+    $("rlTab").innerHTML = '<tr><th>Real / Previsto</th><th>Colorretal (0)</th><th>Pulmão (1)</th></tr>' +
+      '<tr><th>Colorretal</th><td style="background:#E1F5EE">' + vn + '</td><td>' + fp + '</td></tr>' +
+      '<tr><th>Pulmão</th><td>' + fn + '</td><td style="background:#FAECE7">' + vp + '</td></tr>';
+    var rec = vp / (vp + fn), prec = vp + fp ? vp / (vp + fp) : NaN;
+    $("rlRec").textContent = pc(rec); $("rlEsp").textContent = pc(vn / (vn + fp));
+    $("rlPrec").textContent = pc(prec); $("rlVpn").textContent = pc(vn + fn ? vn / (vn + fn) : NaN);
+    $("rlAcc").textContent = pc((vp + vn) / n);
+    $("rlF1v").textContent = isFinite(prec) && prec + rec > 0 ? f(2 * prec * rec / (prec + rec), 3) : "0,000";
+  }
+  $("rlT").value = D.limiar;
+  $("rlE").addEventListener("input", desenha);
+  $("rlT").addEventListener("input", desenha);
+  $("rlF1").addEventListener("click", function () { $("rlT").value = D.limiar; desenha(); });
+  desenha();
+})();
+</script>
+]---"
+
+# 1) No relatório
+cat("\n```{=html}\n", dados_js, "\n", painel_corpo, "\n```\n", sep = "")
+
+# 2) Arquivo HTML independente, salvo na mesma pasta do relatório
+writeLines(c(
+  '<!DOCTYPE html>',
+  '<html lang="pt-BR"><head><meta charset="utf-8">',
+  '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
+  '<title>Painel interativo: regressão logística com esfericidade</title>',
+  '<style>body{margin:0;background:#F4F6F7;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#1F2A30}',
+  '.pg{max-width:780px;margin:0 auto;padding:22px 16px 40px}h1{font-size:1.35rem;margin:0 0 4px}.sub{color:#5E6B73;margin:0 0 14px;font-size:14px}</style>',
+  '</head><body><div class="pg">',
+  '<h1>Painel interativo: regressão logística com esfericidade</h1>',
+  '<p class="sub">Método de Agrupamento para Análise de Estabilidade e Reprodutibilidade em Radiômica · modelo base ajustado com os pacientes de treino</p>',
+  dados_js, painel_corpo,
+  '</div></body></html>'),
+  con <- file("painel_regressao_logistica.html", open = "w", encoding = "UTF-8"))
+close(con)
+```
+
+
+\
+
+# 9. Método de agrupamento: grupos de descritores
+
+A partir daqui, o modelo base com a esfericidade fica como referência, e a
+análise passa aos **grupos de descritores redundantes**. O plano tem quatro
+etapas:
+
+| Etapa | O que faz | Métrica |
+|---|---|---|
+| Agrupamento | agrupa os descritores sem efeito do contraste por correlação | composição e coesão dos grupos |
+| Reprodutibilidade | verifica se os grupos se mantêm com outros pacientes e outras decisões de método | ARI, critério de Hennig, controles |
+| Estabilidade | verifica se a seleção do Random Forest é mais consistente no nível de grupo, por conversão e por importância agrupada | Jaccard e Φ, ajustados pelo acaso; permutação |
+| Previsão | compara o Random Forest com o modelo base, nas mesmas partições | F1, acurácia, AUC; Nadeau e Bengio |
+
+## 9.1 Filtro do contraste: delta de Cliff
+
+Para que o protocolo de contraste não interfira nos grupos, mantêm-se apenas
+os descritores cujo valor não é alterado pelo contraste em nenhum dos
+diagnósticos. O efeito é medido pelo delta de Cliff (Cliff, 1993) entre
+exames com ($A$) e sem ($B$) contraste, separadamente em cada diagnóstico:
+
+$$\delta = \frac{1}{n_A n_B} \sum_{i=1}^{n_A} \sum_{j=1}^{n_B} \operatorname{sign}(x_i^A - x_j^B).$$
+
+Um descritor é mantido quando o efeito é desprezível nos dois diagnósticos,
+$\max(|\delta_{\text{pulmão}}|, |\delta_{\text{colorretal}}|) < 0{,}147$
+(Romano et al., 2006).
+
+```{r cliff}
+cliff_delta <- function(a, b) mean(sign(outer(a, b, "-")))
+efeito <- data.frame(
+  descritor = feat, familia = familia,
+  d_pulmao     = sapply(seq_len(p), function(j) cliff_delta(X[y == 1 & ct == 1, j], X[y == 1 & ct == 0, j])),
+  d_colorretal = sapply(seq_len(p), function(j) cliff_delta(X[y == 0 & ct == 1, j], X[y == 0 & ct == 0, j])))
+efeito$max_abs <- pmax(abs(efeito$d_pulmao), abs(efeito$d_colorretal))
+efeito$mantido <- efeito$max_abs < LIM_DESPREZIVEL
+
+keep18 <- which(efeito$mantido)
+X18 <- X[, keep18, drop = FALSE]; feat18 <- feat[keep18]; fam18 <- familia[keep18]; p18 <- length(keep18)
+
+# Nomes curtos e cores suaves por família, para facilitar a leitura
+ordem_fam <- c("shape", "firstorder", "glcm", "glrlm", "glszm", "gldm", "ngtdm")
+nome_fam  <- c(shape = "Forma", firstorder = "Primeira ordem (intensidades)",
+               glcm = "Coocorrência (GLCM)", glrlm = "Corridas (GLRLM)",
+               glszm = "Zonas (GLSZM)", gldm = "Dependência (GLDM)", ngtdm = "Vizinhança (NGTDM)")
+cor_fam   <- c(shape = "#E8F0FA", firstorder = "#FDEFE0", glcm = "#E6F4EA", glrlm = "#F1EAFA",
+               glszm = "#FCE9EF", gldm = "#FFF6D6", ngtdm = "#E3F4F4")
+
+tab18 <- efeito[keep18, ] %>%
+  mutate(fam = factor(familia, ordem_fam)) %>% arrange(fam, max_abs)
+tb18 <- tab18 %>%
+  transmute(Família = nome_fam[as.character(fam)], Descritor = sub("^[^_]+_", "", nome(descritor)),
+            `Delta no pulmão` = fmt(d_pulmao), `Delta no colorretal` = fmt(d_colorretal)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c"),
+        caption = sprintf("Tabela 29. Os %d descritores com efeito desprezível do contraste nos dois diagnósticos (cores por família)", p18)) %>%
+  kable_styling(bootstrap_options = "condensed", full_width = FALSE)
+for (i in seq_len(nrow(tab18))) tb18 <- row_spec(tb18, i, background = cor_fam[as.character(tab18$fam[i])])
+tb18
+```
+
+> Dos `r p` descritores, `r p18` têm efeito desprezível do contraste nos dois
+> diagnósticos e formam o conjunto usado nas etapas seguintes.
+
+\
+
+# 10. Agrupamento dos descritores
+
+## 10.1 Método
+
+Os descritores são agrupados por agrupamento hierárquico com dissimilaridade
+$d_{jl} = 1 - |\rho_{jl}|$, em que $\rho$ é a correlação de Spearman, ligação
+média e corte em $d =$ `r fmt(CORTE, 2)`, o que corresponde a uma correlação
+absoluta média de pelo menos `r fmt(1 - CORTE, 2)` entre os grupos unidos.
+
+```{r funcoes-cluster}
+particao <- function(Xm, metodo = "spearman", ligacao = "average", h = CORTE) {
+  r <- suppressWarnings(cor(Xm, method = metodo)); r[is.na(r)] <- 0
+  D <- 1 - abs(r); diag(D) <- 0; D <- (D + t(D)) / 2
+  cutree(hclust(as.dist(D), method = ligacao), h = h)
+}
+dist_ref <- function(Xm, metodo = "spearman") {
+  r <- suppressWarnings(cor(Xm, method = metodo)); r[is.na(r)] <- 0
+  D <- 1 - abs(r); diag(D) <- 0; as.dist((D + t(D)) / 2)
+}
+ari <- function(a, b) {
+  tb <- table(a, b)
+  s_ij <- sum(choose(tb, 2)); s_a <- sum(choose(rowSums(tb), 2)); s_b <- sum(choose(colSums(tb), 2))
+  esp <- s_a * s_b / choose(sum(tb), 2); mx <- (s_a + s_b) / 2
+  if (isTRUE(all.equal(mx, esp))) return(1)
+  (s_ij - esp) / (mx - esp)
+}
+jaccard <- function(a, b) { u <- length(union(a, b)); if (u == 0) 1 else length(intersect(a, b)) / u }
+resumo_ic <- function(v) sprintf("%s [%s; %s]", fmt(mean(v)), fmt(quantile(v, .025)), fmt(quantile(v, .975)))
+```
+
+## 10.2 Os grupos
+
+```{r particao}
+lab_ref <- particao(X18)
+rho18 <- cor(X18, method = "spearman")
+Dm <- as.matrix(dist_ref(X18))
+medoide <- function(idx) if (length(idx) == 1) idx else idx[which.min(rowMeans(Dm[idx, idx, drop = FALSE]))]
+ordem_cl <- as.integer(names(sort(table(lab_ref), decreasing = TRUE)))
+comp <- data.frame(
+  Cluster = paste0("C", ordem_cl),
+  Tamanho = as.integer(table(lab_ref)[as.character(ordem_cl)]),
+  Medoide = sapply(ordem_cl, function(cc) nome(feat18[medoide(which(lab_ref == cc))])),
+  Descritores = sapply(ordem_cl, function(cc) paste(nome(feat18[lab_ref == cc]), collapse = ", ")),
+  Famílias = sapply(ordem_cl, function(cc) { tf <- sort(table(fam18[lab_ref == cc]), decreasing = TRUE)
+    paste0(names(tf), " (", tf, ")", collapse = ", ") }),
+  `Coesão (|rho| médio)` = sapply(ordem_cl, function(cc) { idx <- which(lab_ref == cc)
+    if (length(idx) == 1) "" else fmt(mean(abs(rho18[idx, idx])[upper.tri(diag(length(idx)))]), 2) }),
+  check.names = FALSE, row.names = NULL)
+kable(comp, format = "html", row.names = FALSE, align = c("l", "c", "l", "l", "l", "c"),
+      caption = sprintf("Tabela 30. Composição dos %d grupos de descritores", max(lab_ref))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), font_size = 13) %>%
+  column_spec(4, width = "38%")
+```
+
+```{r heatmap18, fig.width=9.5, fig.height=8, fig.cap="Figura 9. Correlação de Spearman entre os 18 descritores, reordenada pelo agrupamento hierárquico."}
+pheatmap::pheatmap(rho18, color = colorRampPalette(c("#5B8FC7", "#FFFFFF", "#E07A62"))(100),
+                   breaks = seq(-1, 1, length.out = 101), number_color = "grey10",
+                   clustering_distance_rows = dist_ref(X18), clustering_distance_cols = dist_ref(X18),
+                   clustering_method = "average", display_numbers = TRUE, number_format = "%.2f",
+                   fontsize_number = 6.5, labels_row = nome(feat18), labels_col = nome(feat18),
+                   fontsize_row = 8, fontsize_col = 8, angle_col = 45, border_color = "white")
+```
+
+```{r dendrograma18, fig.width=9.5, fig.height=4.8, fig.cap="Figura 10. Dendrograma dos 18 descritores. A linha tracejada marca o corte adotado; os retângulos delimitam os grupos."}
+hc18 <- hclust(dist_ref(X18), method = "average")
+par(mar = c(1, 4, 1, 1))
+plot(hc18, labels = nome(feat18), cex = 0.72, hang = -1, main = "", xlab = "", sub = "",
+     ylab = "Dissimilaridade  d = 1 - |rho|")
+abline(h = CORTE, lty = 2, col = "firebrick", lwd = 1.5)
+rect.hclust(hc18, h = CORTE, border = "grey40")
+```
+
+> Os `r p18` descritores formam `r max(lab_ref)` grupos, dos quais
+> `r sum(table(lab_ref) == 1)` têm um único descritor. Dentro de cada grupo,
+> os descritores são praticamente intercambiáveis; os grupos representam
+> informações distintas da lesão.
+
+\
+
+# 11. Reprodutibilidade dos grupos
+
+A partição é comparada, pelo Índice de Rand Ajustado (ARI), com partições
+obtidas ao perturbar os **dados** (reamostragem dos pacientes) e o **método**
+(multiverso de correlação, ligação e corte). A estabilidade de cada grupo é
+avaliada pelo critério de Hennig (2007), e a dependência da estrutura em
+relação ao diagnóstico e ao protocolo, por controles com divisões aleatórias.
+
+O ARI compara duas partições dos mesmos descritores olhando **pares de
+descritores**: um par concorda quando as duas partições o mantêm junto, ou o
+mantêm separado. O índice de Rand é a proporção de pares concordantes, e o ARI
+desconta dessa proporção a concordância esperada ao acaso (Hubert e Arabie,
+1985): vale 1 para partições idênticas e fica perto de 0 para concordância
+equivalente ao acaso.
+
+**Painel interativo.** O agrupamento A é fixo; clique num descritor do
+agrupamento B para mudá-lo de grupo e veja os pares concordantes e o ARI se
+atualizarem. O exemplo usa seis descritores do estudo, com agrupamentos
+construídos para fins didáticos.
+
+```{=html}
+<style>
+.ari{border:1px solid #DADFE2;border-radius:10px;padding:14px 16px;margin:14px 0 24px;background:#FBFCFC;font-size:14px}
+.ari-chip{display:inline-block;font-size:12px;padding:5px 8px;border-radius:6px;border:1px solid transparent;margin:2px;min-width:96px;text-align:center;user-select:none}
+.ari-clk{cursor:pointer}
+.ari-g1{background:#EEEDFE;color:#3C3489;border-color:#AFA9EC}
+.ari-g2{background:#E6F1FB;color:#0C447C;border-color:#85B7EB}
+.ari-g3{background:#FAEEDA;color:#633806;border-color:#EF9F27}
+.ari-lab{font-size:12.5px;color:#5E6B73}
+.ari-met{background:#EEF2F3;border-radius:8px;padding:7px 12px}
+.ari-met .v{font-size:19px;font-weight:600;color:#1F2A30}
+.ari-btn{border:1px solid #9AA5AB;background:#fff;border-radius:6px;padding:4px 11px;font-size:13px;cursor:pointer}
+</style>
+<div class="ari">
+  <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:center">
+    <span class="ari-lab">Agrupamento A</span><div id="ariA"></div>
+    <span class="ari-lab">Agrupamento B<br>(clique para mudar)</span><div id="ariB"></div>
+  </div>
+  <div style="margin:10px 0 14px 126px">
+    <button class="ari-btn" id="ariId">Idênticos</button>
+    <button class="ari-btn" id="ariTr">Uma troca</button>
+    <button class="ari-btn" id="ariAl">Aleatório</button>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start">
+    <div>
+      <div class="ari-lab" style="margin-bottom:4px">Cada quadrado é um par de descritores</div>
+      <div id="ariGrid"></div>
+      <div class="ari-lab" style="margin-top:8px;line-height:1.8">
+        <span style="display:inline-block;width:11px;height:11px;background:#5DCAA5;margin-right:6px"></span>juntos nos dois (concordam)<br>
+        <span style="display:inline-block;width:11px;height:11px;background:#D3D1C7;margin-right:6px"></span>separados nos dois (concordam)<br>
+        <span style="display:inline-block;width:11px;height:11px;background:#F0997B;margin-right:6px"></span>juntos num, separados no outro (discordam)
+      </div>
+    </div>
+    <div style="flex:1;min-width:230px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="ari-met"><div class="ari-lab">Pares que concordam</div><div class="v" id="ariC"></div></div>
+      <div class="ari-met"><div class="ari-lab">Índice de Rand</div><div class="v" id="ariR"></div></div>
+      <div class="ari-met"><div class="ari-lab">Esperado ao acaso</div><div class="v" id="ariE"></div></div>
+      <div class="ari-met" style="border:1.5px solid #2F6B5E;background:#E3EFEB"><div class="ari-lab">ARI</div><div class="v" id="ariV"></div></div>
+      <div class="ari-lab" style="grid-column:1/-1;font-size:13px;line-height:1.6" id="ariMsg"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var nomes = ["Energy", "TotalEnergy", "ZoneEntropy", "JointAverage", "Autocorrelation", "Range"];
+  var A = [1, 1, 1, 2, 2, 2], B = [1, 1, 2, 2, 2, 2];
+  function $(id) { return document.getElementById(id); }
+  function c2(n) { return n * (n - 1) / 2; }
+  function f(x) { return x.toFixed(2).replace(".", ","); }
+  function chips(el, P, clk) {
+    el.innerHTML = "";
+    P.forEach(function (g, i) {
+      var d = document.createElement("span");
+      d.className = "ari-chip ari-g" + g + (clk ? " ari-clk" : "");
+      d.textContent = nomes[i];
+      if (clk) d.addEventListener("click", function () { B[i] = B[i] % 3 + 1; draw(); });
+      el.appendChild(d);
+    });
+  }
+  function calc(a, b) {
+    var n = a.length, t = {}, ra = {}, cb = {}, k;
+    for (var i = 0; i < n; i++) { k = a[i] + "_" + b[i]; t[k] = (t[k] || 0) + 1; ra[a[i]] = (ra[a[i]] || 0) + 1; cb[b[i]] = (cb[b[i]] || 0) + 1; }
+    var sij = 0, sa = 0, sb = 0;
+    for (k in t) sij += c2(t[k]); for (k in ra) sa += c2(ra[k]); for (k in cb) sb += c2(cb[k]);
+    var tot = c2(n), esp = sa * sb / tot, mx = (sa + sb) / 2, conc = 0;
+    for (var p = 0; p < n; p++) for (var q = p + 1; q < n; q++) if ((a[p] === a[q]) === (b[p] === b[q])) conc++;
+    return {conc: conc, tot: tot, rand: conc / tot, espRand: (esp + (tot - sa - sb + esp)) / tot,
+            ari: Math.abs(mx - esp) < 1e-12 ? 1 : (sij - esp) / (mx - esp)};
+  }
+  function draw() {
+    chips($("ariA"), A, false); chips($("ariB"), B, true);
+    var n = nomes.length, h = '<table style="border-collapse:separate;border-spacing:3px"><tr><td></td>';
+    for (var j = 1; j < n; j++) h += '<td style="font-size:10.5px;color:#5E6B73;text-align:center;width:30px">' + nomes[j].slice(0, 5) + '</td>';
+    h += '</tr>';
+    for (var i = 0; i < n - 1; i++) {
+      h += '<tr><td style="font-size:10.5px;color:#5E6B73;text-align:right;padding-right:4px">' + nomes[i].slice(0, 7) + '</td>';
+      for (j = 1; j < n; j++) {
+        if (j <= i) { h += '<td></td>'; continue; }
+        var ja = A[i] === A[j], jb = B[i] === B[j];
+        var cor = (ja && jb) ? "#5DCAA5" : (!ja && !jb) ? "#D3D1C7" : "#F0997B";
+        h += '<td><div title="' + nomes[i] + ' e ' + nomes[j] + '" style="width:30px;height:30px;border-radius:4px;background:' + cor + '"></div></td>';
+      }
+      h += '</tr>';
+    }
+    $("ariGrid").innerHTML = h + '</table>';
+    var r = calc(A, B);
+    $("ariC").textContent = r.conc + " de " + r.tot; $("ariR").textContent = f(r.rand);
+    $("ariE").textContent = f(r.espRand); $("ariV").textContent = f(r.ari);
+    $("ariMsg").textContent = r.ari > 0.99 ? "Os dois agrupamentos são idênticos: todos os pares concordam e o ARI vale 1." :
+      r.ari > 0.2 ? "O índice de Rand parece alto, mas parte da concordância viria só do acaso. O ARI desconta essa parte." :
+      "A concordância está perto do que se esperaria ao acaso: o ARI fica perto de zero, ou até abaixo.";
+  }
+  $("ariId").addEventListener("click", function () { B = A.slice(); draw(); });
+  $("ariTr").addEventListener("click", function () { B = [1, 1, 2, 2, 2, 2]; draw(); });
+  $("ariAl").addEventListener("click", function () { B = nomes.map(function () { return 1 + Math.floor(Math.random() * 3); }); draw(); });
+  draw();
+})();
+</script>
+```
+
+```{r reamostragem}
+set.seed(SEMENTE)
+reamostra <- function(frac, repor) replicate(B_BOOT, {
+  idx <- sample.int(n, size = round(n * frac), replace = repor); ari(lab_ref, particao(X18[idx, ]))
+})
+a_boot <- reamostra(1, TRUE); a_75 <- reamostra(.75, FALSE); a_50 <- reamostra(.5, FALSE)
+a_split <- replicate(B_BOOT, { q <- sample.int(n)
+  ari(particao(X18[q[1:floor(n / 2)], ]), particao(X18[q[(floor(n / 2) + 1):n], ])) })
+data.frame(Perturbação = c("Bootstrap dos pacientes", "Subamostra de 75 %", "Subamostra de 50 %", "Metades disjuntas"),
+           `ARI médio [IC 95 %]` = c(resumo_ic(a_boot), resumo_ic(a_75), resumo_ic(a_50), resumo_ic(a_split)),
+           check.names = FALSE) %>%
+  kable(format = "html", align = c("l", "c"),
+        caption = sprintf("Tabela 31. Reprodutibilidade da partição sob reamostragem dos pacientes (%d repetições)", B_BOOT)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r multiverso}
+mv <- expand.grid(Correlação = c("spearman", "pearson"), Ligação = c("average", "ward.D2", "complete"),
+                  Corte = c(0.10, 0.20, 0.30), stringsAsFactors = FALSE)
+mv$Grupos <- NA_integer_; mv$ARI <- NA_real_
+for (i in seq_len(nrow(mv))) { l <- particao(X18, mv$Correlação[i], mv$Ligação[i], mv$Corte[i])
+  mv$Grupos[i] <- max(l); mv$ARI[i] <- ari(lab_ref, l) }
+mv %>% arrange(desc(ARI)) %>% mutate(ARI = fmt(ARI), Corte = fmt(Corte, 2)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c", "c"),
+        caption = "Tabela 32. Multiverso: ARI de cada combinação de método contra a partição de referência") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r hennig}
+set.seed(SEMENTE)
+cls <- sort(unique(lab_ref))
+Jm <- t(replicate(B_BOOT, { gb <- split(seq_len(p18), particao(X18[sample.int(n, n, replace = TRUE), ]))
+  sapply(cls, function(cc) max(sapply(gb, function(g) jaccard(which(lab_ref == cc), g)))) }))
+data.frame(Grupo = paste0("C", cls), Tamanho = as.integer(table(lab_ref)),
+           `Jaccard médio` = fmt(colMeans(Jm)),
+           Situação = cut(colMeans(Jm), c(-Inf, .5, .75, Inf), labels = c("Dissolvido", "Intermediário", "Estável")),
+           check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+        caption = sprintf("Tabela 33. Estabilidade de cada grupo pelo critério de Hennig (%d reamostragens)", B_BOOT)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r controles}
+set.seed(SEMENTE)
+controle <- function(g) {
+  n1 <- sum(g); obs <- ari(particao(X18[g == 1, ]), particao(X18[g == 0, ]))
+  nulo <- replicate(B_BOOT, { q <- sample.int(n); ari(particao(X18[q[1:n1], ]), particao(X18[q[(n1 + 1):n], ])) })
+  c(obs = obs, media = mean(nulo), p = (1 + sum(nulo <= obs)) / (B_BOOT + 1))
+}
+c_dx <- controle(y); c_ct <- controle(ct)
+data.frame(Fator = c("Diagnóstico", "Protocolo de contraste"),
+           `ARI observado` = fmt(c(c_dx["obs"], c_ct["obs"])), `ARI médio ao acaso` = fmt(c(c_dx["media"], c_ct["media"])),
+           `p empírico` = fmt(c(c_dx["p"], c_ct["p"])), check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+        caption = "Tabela 34. A estrutura depende do diagnóstico ou do protocolo?") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> No bootstrap, a partição se reproduz com ARI médio de `r fmt(mean(a_boot))`.
+> Mantido o corte, a pior combinação de correlação e ligação dá ARI de
+> `r fmt(min(mv$ARI[mv$Corte == CORTE]))`. A estrutura
+> `r if (c_dx["p"] >= .05 && c_ct["p"] >= .05) "não depende" else "parece depender"`
+> do diagnóstico (p = `r fmt(c_dx["p"])`) nem do protocolo (p = `r fmt(c_ct["p"])`).
+
+\
+
+# 12. Random Forest: estabilidade e previsão
+
+## 12.1 Método
+
+O Random Forest (Breiman, 2001) é ajustado com os `r p18` descritores, nas
+**mesmas partições** da validação cruzada do modelo base (`r N_SEEDS`
+repetições de `r N_FOLDS` folds estratificados pelo diagnóstico). Em cada fold,
+só com os pacientes de treino:
+
+1. o `mtry` (número de descritores sorteados em cada divisão) é escolhido numa
+   grade, pela maior AUC nas previsões *out-of-bag*, isto é, nos pacientes de
+   treino que cada árvore não usou;
+2. o **limiar** é escolhido pelo maior F1 nessas mesmas previsões
+   *out-of-bag*, como no modelo base;
+3. a importância de cada descritor é medida por permutação.
+
+O mesmo ajuste fornece as duas análises: a **estabilidade**, pelos $k$
+descritores mais importantes de cada fold, e a **previsão**, pelas
+probabilidades nos pacientes de validação.
+
+```{r rf-cv, cache=TRUE, cache.extra=list(X18, y, N_SEEDS, N_FOLDS, NTREE, GRADE_LIMIAR, lab_ref, R_GRUPO)}
+roda_rf <- function(yy, seeds = N_SEEDS, mtry_fixo = NULL, metr = TRUE, y_folds = yy,
+                    grp = FALSE, r_grp = R_GRUPO) {
+  imp <- matrix(NA_real_, seeds * N_FOLDS, p18); seed_fit <- integer(seeds * N_FOLDS)
+  grupos <- split(seq_len(p18), lab_ref)
+  imp_g <- matrix(NA_real_, seeds * N_FOLDS, length(grupos), dimnames = list(NULL, paste0("C", names(grupos))))
+  linhas <- list(); pr <- list(); mt_usado <- integer(seeds * N_FOLDS); l <- 0
+  grade_mt <- unique(pmax(1, round(c(sqrt(p18), p18 / 4, p18 / 2))))
+  for (s in seq_len(seeds)) {
+    set.seed(1000 + s)
+    folds <- createFolds(factor(y_folds), k = N_FOLDS, list = TRUE)
+    for (f in seq_along(folds)) {
+      l <- l + 1; te <- folds[[f]]; tr <- setdiff(seq_len(n), te); seed_fit[l] <- s
+      set.seed(3000 + l)
+      if (is.null(mtry_fixo)) {
+        fits <- lapply(grade_mt, function(mt) randomForest(X18[tr, ], factor(yy[tr]), ntree = NTREE, mtry = mt, importance = TRUE))
+        aucs <- sapply(fits, function(m) auc_de(yy[tr], m$votes[, "1"]))
+        m <- fits[[which.max(aucs)]]; mt_usado[l] <- grade_mt[which.max(aucs)]
+      } else {
+        m <- randomForest(X18[tr, ], factor(yy[tr]), ntree = NTREE, mtry = mtry_fixo, importance = TRUE)
+        mt_usado[l] <- mtry_fixo
+      }
+      imp[l, ] <- importance(m, type = 1)[, 1]
+      prob <- predict(m, X18[te, ], type = "prob")[, "1"]
+      if (grp) {                      # importância agrupada: queda de AUC ao embaralhar o grupo inteiro
+        auc0 <- auc_de(yy[te], prob)
+        for (g in seq_along(grupos)) imp_g[l, g] <- mean(replicate(r_grp, {
+          Xp <- X18[te, , drop = FALSE]; q <- sample.int(length(te))
+          Xp[, grupos[[g]]] <- Xp[q, grupos[[g]], drop = FALSE]
+          auc0 - auc_de(yy[te], predict(m, Xp, type = "prob")[, "1"]) }))
+      }
+      if (metr) {
+        t <- limiar_f1(yy[tr], m$votes[, "1"])
+        linhas[[l]] <- data.frame(semente = s, fold = f, limiar = t, t(metricas(yy[te], prob, t)),
+                                  AUC = auc_de(yy[te], prob), check.names = FALSE)
+        pr[[l]] <- data.frame(semente = s, fold = f, paciente = te, prob = prob, y = yy[te])
+      } else linhas[[l]] <- data.frame(AUC = auc_de(yy[te], prob))
+    }
+  }
+  list(imp = imp, imp_g = imp_g, seed_fit = seed_fit, mtry = mt_usado, res = do.call(rbind, linhas),
+       pred = if (length(pr)) do.call(rbind, pr) else NULL)
+}
+rf <- roda_rf(y, grp = TRUE)
+```
+
+## 12.2 Estabilidade da seleção
+
+Em cada fold, os $k$ descritores de maior importância (com importância
+positiva) formam o conjunto selecionado. A estabilidade é medida pelo
+Jaccard, entre os folds de cada repetição, e pelo $\Phi$ de Nogueira, sobre os
+`r N_SEEDS * N_FOLDS` conjuntos, nos níveis de **descritor** e de **grupo**
+(cada descritor substituído pelo seu grupo). Como poucos grupos de tamanhos
+desiguais coincidem bastante mesmo ao acaso, cada índice é comparado com o
+valor esperado sob seleção aleatória de $k$ descritores e ajustado:
+$(\text{observado} - \text{acaso}) / (1 - \text{acaso})$.
+
+```{r estab-funcoes}
+bin_var <- function(imp, k) t(apply(imp, 1, function(v) {
+  o <- order(v, decreasing = TRUE)[seq_len(k)]; o <- o[v[o] > 0]; as.numeric(seq_along(v) %in% o) }))
+bin_cl <- function(imp, k) { niv <- sort(unique(lab_ref)); Zv <- bin_var(imp, k)
+  t(apply(Zv, 1, function(r) as.numeric(niv %in% unique(lab_ref[r == 1])))) }
+jac_medio <- function(Z) { I <- Z %*% t(Z); tam <- rowSums(Z); U <- outer(tam, tam, "+") - I
+  J <- ifelse(U > 0, I / pmax(U, 1), 1); mean(J[upper.tri(J)]) }
+phi_nog <- function(Z) { pz <- ncol(Z); kb <- mean(rowSums(Z)); if (kb == 0 || kb == pz) return(NA_real_)
+  1 - mean(apply(Z, 2, var)) / ((kb / pz) * (1 - kb / pz)) }
+por_semente <- function(Z, sf) sapply(sort(unique(sf)), function(s) jac_medio(Z[sf == s, , drop = FALSE]))
+bin_top <- function(M, k) t(apply(M, 1, function(v) as.numeric(seq_along(v) %in% order(v, decreasing = TRUE)[seq_len(k)])))
+sorteia <- function(k, M) { niv <- sort(unique(lab_ref)); Zv <- matrix(0, M, p18); Zc <- matrix(0, M, length(niv))
+  for (m in seq_len(M)) { s <- sample.int(p18, k); Zv[m, s] <- 1; Zc[m, match(unique(lab_ref[s]), niv)] <- 1 }
+  list(v = Zv, c = Zc) }
+```
+
+```{r estabilidade, cache=TRUE, cache.extra=list(rf$imp, lab_ref, K_GRID, B_ACASO)}
+set.seed(SEMENTE)
+tab_estab <- do.call(rbind, lapply(K_GRID, function(k) {
+  jv <- mean(por_semente(bin_var(rf$imp, k), rf$seed_fit)); jc <- mean(por_semente(bin_cl(rf$imp, k), rf$seed_fit))
+  pv <- phi_nog(bin_var(rf$imp, k)); pc <- phi_nog(bin_cl(rf$imp, k))
+  ac <- replicate(B_ACASO, { z <- sorteia(k, N_FOLDS); c(jac_medio(z$v), jac_medio(z$c)) })
+  ap <- replicate(200, { z <- sorteia(k, N_SEEDS * N_FOLDS); c(phi_nog(z$v), phi_nog(z$c)) })
+  aj <- function(o, a) (o - a) / (1 - a)
+  data.frame(k = k, `J descritor` = jv, `J grupo` = jc,
+             `J descritor ajustado` = aj(jv, mean(ac[1, ])), `J grupo ajustado` = aj(jc, mean(ac[2, ])),
+             `Phi descritor ajustado` = aj(pv, mean(ap[1, ], na.rm = TRUE)), `Phi grupo ajustado` = aj(pc, mean(ap[2, ], na.rm = TRUE)),
+             check.names = FALSE)
+}))
+tab_estab %>% mutate(across(-k, ~ fmt(.x))) %>%
+  kable(format = "html", row.names = FALSE, align = "c",
+        caption = "Tabela 35. Estabilidade da seleção do Random Forest nos níveis de descritor e de grupo") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+Para verificar se a estabilidade depende do sinal do diagnóstico, os
+diagnósticos são embaralhados entre os pacientes e a análise é refeita,
+mantendo as mesmas partições e apenas trocando os rótulos. Por custo
+computacional, cada permutação usa `r N_SEEDS_PERM` repetições e o `mtry` mais
+escolhido na análise principal. O p-valor empírico de cada estatística $T$ é
+$p = \left(1 + \sum_b I(T_b^{\text{nulo}} \geq T_{\text{obs}})\right) / (B + 1)$.
+
+```{r permutacao-rf, cache=TRUE, cache.extra=list(X18, y, lab_ref, B_PERM, TOP_K, NTREE, TOP_K_G, R_GRUPO_PERM)}
+mtry_modal <- as.integer(names(sort(table(rf$mtry), decreasing = TRUE))[1])
+estat <- function(r) c(AUC = mean(r$res$AUC),
+                       Jv = mean(por_semente(bin_var(r$imp, TOP_K), r$seed_fit)),
+                       Jc = mean(por_semente(bin_cl(r$imp, TOP_K), r$seed_fit)),
+                       Jg = mean(por_semente(bin_top(r$imp_g, TOP_K_G), r$seed_fit)))
+obs_p <- estat(roda_rf(y, seeds = N_SEEDS_PERM, mtry_fixo = mtry_modal, metr = FALSE,
+                       grp = TRUE, r_grp = R_GRUPO_PERM))
+nulo_p <- t(sapply(seq_len(B_PERM), function(b) { set.seed(5000 + b)
+  estat(roda_rf(sample(y), seeds = N_SEEDS_PERM, mtry_fixo = mtry_modal, metr = FALSE, y_folds = y,
+                grp = TRUE, r_grp = R_GRUPO_PERM)) }))
+```
+
+```{r permutacao-tab}
+obs_p["Ganho"] <- obs_p["Jc"] - obs_p["Jv"]; nulo_p <- cbind(nulo_p, Ganho = nulo_p[, "Jc"] - nulo_p[, "Jv"])
+p_perm <- sapply(names(obs_p), function(k) (1 + sum(nulo_p[, k] >= obs_p[k])) / (B_PERM + 1))
+data.frame(Estatística = c("AUC", sprintf("J descritor (k = %d)", TOP_K), sprintf("J grupo, por conversão (k = %d)", TOP_K),
+                           sprintf("J grupo, importância agrupada (k = %d)", TOP_K_G), "Ganho da conversão (grupo menos descritor)"),
+           Observado = fmt(obs_p), `Com diagnósticos embaralhados` = fmt(colMeans(nulo_p)),
+           `p empírico` = fmt(p_perm), check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+        caption = sprintf("Tabela 36. Teste de permutação do diagnóstico (%d permutações)", B_PERM)) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r estab-texto, echo=FALSE}
+lk <- tab_estab[tab_estab$k == TOP_K, ]
+```
+
+> Com $k =$ `r TOP_K`, o Jaccard é de `r fmt(lk[["J descritor"]])` no nível de
+> descritor e de `r fmt(lk[["J grupo"]])` no nível de grupo. Descontado o
+> acaso, os valores passam a `r fmt(lk[["J descritor ajustado"]])` e
+> `r fmt(lk[["J grupo ajustado"]])`. No teste de permutação, o ganho de ler a
+> seleção por grupo foi de `r fmt(obs_p["Ganho"])`, contra
+> `r fmt(mean(nulo_p[, "Ganho"]))` com os diagnósticos embaralhados
+> (p = `r fmt(p_perm["Ganho"])`).
+
+## 12.3 Estabilidade com importância agrupada
+
+Na seção anterior, a seleção é feita **por descritor** e só depois convertida
+em grupos: um grupo conta como selecionado se qualquer um de seus descritores
+estiver entre os $k$ mais importantes. Com isso, grupos com muitos descritores
+tendem a ser "selecionados" com frequência mesmo ao acaso. A **importância
+agrupada** (Gregorutti, Michel e Saint-Pierre, 2015) mede a importância
+diretamente no nível do grupo: no mesmo modelo já ajustado, embaralham-se
+**todos os descritores de um grupo ao mesmo tempo** nos pacientes de validação, e
+mede-se a queda da AUC:
+
+$$I_G = \text{AUC}_{\text{validação}} - \text{AUC}_{\text{validação}}(\text{grupo } G \text{ embaralhado}),$$
+
+com média de `r R_GRUPO` embaralhamentos por grupo. Como o modelo e as
+previsões são os mesmos, o F1 não muda; muda apenas a forma de medir a
+importância. Os autores também propõem dividir $I_G$ pelo número de
+descritores do grupo, para que grupos grandes não sejam favorecidos apenas
+pelo tamanho; as duas versões são apresentadas. Em cada fold, os $k$ grupos
+de maior importância formam o conjunto selecionado, e, como todos os grupos
+competem em igualdade, a linha de base do acaso é a escolha uniforme de $k$
+dos `r max(lab_ref)` grupos.
+
+```{r imp-agrupada}
+tam_g <- as.numeric(table(lab_ref))
+imp_g_norm <- sweep(rf$imp_g, 2, tam_g, "/")
+freq_top <- function(M, k) colMeans(bin_top(M, k))
+data.frame(Grupo = colnames(rf$imp_g), Tamanho = tam_g,
+           Medoide = sapply(sort(unique(lab_ref)), function(cc) nome(feat18[medoide(which(lab_ref == cc))])),
+           `Importância média (queda de AUC)` = fmt(colMeans(rf$imp_g)),
+           `Mais importante (% dos folds)` = pct(freq_top(rf$imp_g, 1)),
+           `Entre os 2 mais importantes` = pct(freq_top(rf$imp_g, 2)),
+           `Entre os 2 mais importantes (ajustada pelo tamanho)` = pct(freq_top(imp_g_norm, 2)),
+           check.names = FALSE, row.names = NULL) %>%
+  arrange(desc(`Importância média (queda de AUC)`)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "l", "c", "c", "c", "c"),
+        caption = sprintf("Tabela 37. Importância agrupada de cada grupo nos %d folds", nrow(rf$imp_g))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r estab-agrupada, cache=TRUE, cache.extra=list(rf$imp_g, rf$imp, K_GRID_G, B_ACASO)}
+set.seed(SEMENTE)
+G <- ncol(rf$imp_g)
+acaso_g <- function(k) {
+  jj <- replicate(B_ACASO, { Z <- t(replicate(N_FOLDS, as.numeric(seq_len(G) %in% sample.int(G, k)))); jac_medio(Z) })
+  pp <- replicate(200, { Z <- t(replicate(N_SEEDS * N_FOLDS, as.numeric(seq_len(G) %in% sample.int(G, k)))); phi_nog(Z) })
+  c(J = mean(jj), Phi = mean(pp, na.rm = TRUE))
+}
+aj <- function(o, a) (o - a) / (1 - a)
+linha <- function(rotulo, Z, a) { j <- mean(por_semente(Z, rf$seed_fit)); ph <- phi_nog(Z)
+  data.frame(Nível = rotulo, `J observado` = j, `J ao acaso` = a["J"], `J ajustado` = aj(j, a["J"]),
+             `Phi observado` = ph, `Phi ajustado` = aj(ph, a["Phi"]), check.names = FALSE) }
+lk_ <- tab_estab[tab_estab$k == TOP_K, ]
+a_desc <- replicate(B_ACASO, { z <- sorteia(TOP_K, N_FOLDS); c(jac_medio(z$v), jac_medio(z$c)) })
+p_desc <- replicate(200, { z <- sorteia(TOP_K, N_SEEDS * N_FOLDS); c(phi_nog(z$v), phi_nog(z$c)) })
+tab_ag <- rbind(
+  linha(sprintf("Descritor (k = %d de %d)", TOP_K, p18), bin_var(rf$imp, TOP_K),
+        c(J = mean(a_desc[1, ]), Phi = mean(p_desc[1, ], na.rm = TRUE))),
+  linha(sprintf("Grupo, por conversão (k = %d descritores)", TOP_K), bin_cl(rf$imp, TOP_K),
+        c(J = mean(a_desc[2, ]), Phi = mean(p_desc[2, ], na.rm = TRUE))),
+  do.call(rbind, lapply(K_GRID_G, function(k) { a <- acaso_g(k)
+    rbind(linha(sprintf("Grupo, importância agrupada (k = %d de %d)", k, G), bin_top(rf$imp_g, k), a),
+          linha(sprintf("Grupo, importância agrupada ajustada pelo tamanho (k = %d de %d)", k, G), bin_top(imp_g_norm, k), a)) })))
+```
+
+```{r estab-agrupada-tab}
+tab_ag %>% mutate(across(-Nível, ~ fmt(.x))) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", rep("c", 5)),
+        caption = "Tabela 38. Estabilidade da seleção: por descritor, por grupo via conversão e por grupo via importância agrupada") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  row_spec(c(1, 2), background = "#F4F6F7")
+```
+
+**Um exemplo com dois folds**
+
+| Posição | Fold 1 | Fold 2 |
+|---|---|---|
+| 1.º | C2 | C2 |
+| 2.º | C3 | C5 |
+| 3.º | C5 | C3 |
+| 4.º | C4 | C1 |
+| 5.º | C1 | C4 |
+
+Agora, olhando o topo da lista com cada k:
+
+| k | Fold 1 escolhe | Fold 2 escolhe | Em comum | Jaccard |
+|---|---|---|---|---|
+| 1 (só o primeiro) | {C2} | {C2} | C2 | 1 / 1 = 1,00 |
+| 2 (os dois primeiros) | {C2, C3} | {C2, C5} | C2 | 1 / 3 = 0,33 |
+| 3 (os três primeiros) | {C2, C3, C5} | {C2, C5, C3} | C2, C3, C5 | 3 / 3 = 1,00 |
+
+- Com k = 1, a pergunta é: "o grupo mais importante é o mesmo nos dois folds?". Aqui, sim.
+- Com k = 2, a pergunta é: "os dois mais importantes são os mesmos?". Aqui, não: o segundo lugar mudou.
+- Com k = 3, a pergunta é sobre os três mais importantes.
+
+```{r estab-agrupada-texto, echo=FALSE}
+la <- tab_ag[grepl(sprintf("^Grupo, importância agrupada \\(k = %d", TOP_K_G), tab_ag$Nível), ]
+ld <- tab_ag[1, ]
+lk <- function(k) tab_ag[grepl(sprintf("^Grupo, importância agrupada \\(k = %d", k), tab_ag$Nível), ]
+freq1 <- colMeans(bin_top(rf$imp_g, 1)); g_top <- colnames(rf$imp_g)[which.max(freq1)]
+```
+
+> Com a importância agrupada, o grupo mais importante (k = 1) foi selecionado
+> de forma muito consistente entre os folds, com Jaccard ajustado pelo acaso de
+> `r fmt(lk(1)[["J ajustado"]])`, contra `r fmt(ld[["J ajustado"]])` no nível de
+> descritor: o grupo `r g_top` foi o mais importante em `r pct(max(freq1))` dos
+> folds. A estabilidade, porém, não se estendeu aos grupos seguintes, caindo para
+> `r fmt(lk(2)[["J ajustado"]])` com k = 2 e para `r fmt(lk(3)[["J ajustado"]])`
+> com k = 3, porque os demais grupos tiveram importância próxima de zero. No
+> teste de permutação (Tabela 36), a estabilidade dos grupos pela importância
+> agrupada (k = `r TOP_K_G`) foi de `r fmt(obs_p["Jg"])`, contra
+> `r fmt(mean(nulo_p[, "Jg"]))` com os diagnósticos embaralhados
+> (p = `r fmt(p_perm["Jg"])`): ela depende do sinal diagnóstico. Ao contrário da
+> conversão, aqui todos os grupos competem em igualdade, e a comparação com o
+> acaso não é inflada pelo tamanho dos grupos.
+
+### Incerteza da estabilidade
+
+Os índices de estabilidade acima são estimativas, sujeitas à variação das
+partições. Para o $\Phi$ de Nogueira, Sechidis e Brown (2018) propõem um
+estimador da variância e um intervalo de confiança assintótico; como esse
+intervalo supõe seleções independentes, e os folds de uma mesma repetição
+compartilham pacientes, ele tende a ser estreito demais. Por isso, as
+comparações entre os níveis de descritor e de grupo usam também um bootstrap
+por repetição: as 10 repetições da validação cruzada são reamostradas com
+reposição, cada uma com os seus 5 folds, e a diferença entre os $\Phi$ é
+recalculada a cada reamostragem. Como o $\Phi$ já é corrigido pelo acaso
+quando o número de itens selecionados é fixo, as comparações usam as seleções
+de tamanho fixo: os `r TOP_K` descritores mais importantes e os 1 ou 2 grupos
+mais importantes pela importância agrupada.
+
+```{r phi-incerteza}
+phi_var <- function(Z) {           # variância assintótica do Phi (Nogueira, Sechidis e Brown, 2018)
+  M <- nrow(Z); d <- ncol(Z); kb <- mean(rowSums(Z)); ph <- colMeans(Z)
+  phi <- phi_nog(Z); den <- (kb / d) * (1 - kb / d)
+  th <- sapply(seq_len(M), function(i) { ki <- sum(Z[i, ])
+    (mean(Z[i, ] * ph) - ki * kb / d^2 + (phi / 2) * (2 * ki * kb / d^2 - ki / d - kb / d + 1)) / den })
+  4 / M^2 * sum((th - mean(th))^2)
+}
+Zd  <- bin_var(rf$imp, TOP_K); Zg1 <- bin_top(rf$imp_g, 1); Zg2 <- bin_top(rf$imp_g, 2)
+linha_phi <- function(rotulo, Z) { ph <- phi_nog(Z); ep <- sqrt(phi_var(Z))
+  data.frame(Seleção = rotulo, Phi = fmt(ph), `IC 95 % assintótico` = sprintf("[%s; %s]", fmt(ph - 1.96 * ep), fmt(min(1, ph + 1.96 * ep))),
+             check.names = FALSE) }
+rbind(linha_phi(sprintf("Descritor (k = %d de %d)", TOP_K, p18), Zd),
+      linha_phi(sprintf("Grupo, importância agrupada (k = 1 de %d)", ncol(Zg1)), Zg1),
+      linha_phi(sprintf("Grupo, importância agrupada (k = 2 de %d)", ncol(Zg2)), Zg2)) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c"),
+        caption = "Tabela 39. Índice Phi de estabilidade com intervalo de confiança assintótico") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+set.seed(SEMENTE)
+sementes_rf <- sort(unique(rf$seed_fit))
+boot_phi <- t(replicate(2000, {
+  ss <- sample(sementes_rf, replace = TRUE)
+  idx <- unlist(lapply(ss, function(s) which(rf$seed_fit == s)))
+  c(g1 = phi_nog(Zg1[idx, , drop = FALSE]) - phi_nog(Zd[idx, , drop = FALSE]),
+    g2 = phi_nog(Zg2[idx, , drop = FALSE]) - phi_nog(Zd[idx, , drop = FALSE]))
+}))
+dif_obs <- c(g1 = phi_nog(Zg1) - phi_nog(Zd), g2 = phi_nog(Zg2) - phi_nog(Zd))
+data.frame(Comparação = c("Grupo (k = 1) menos descritor", "Grupo (k = 2) menos descritor"),
+           `Diferença no Phi` = fmt(dif_obs),
+           `IC 95 % (bootstrap por repetição)` = sprintf("[%s; %s]", fmt(apply(boot_phi, 2, quantile, .025, na.rm = TRUE)),
+                                                        fmt(apply(boot_phi, 2, quantile, .975, na.rm = TRUE))),
+           check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c"),
+        caption = "Tabela 40. Diferença de estabilidade entre os níveis de grupo e de descritor") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+> Se o intervalo da diferença exclui o zero, a estabilidade no nível de grupo
+> difere da do nível de descritor de forma consistente entre as repetições. A
+> diferença com o grupo mais importante (k = 1) foi de
+> `r fmt(dif_obs["g1"])` (IC 95 %: `r fmt(quantile(boot_phi[, "g1"], .025, na.rm = TRUE))`
+> a `r fmt(quantile(boot_phi[, "g1"], .975, na.rm = TRUE))`), e, com os dois grupos
+> mais importantes (k = 2), de `r fmt(dif_obs["g2"])`
+> (IC 95 %: `r fmt(quantile(boot_phi[, "g2"], .025, na.rm = TRUE))` a
+> `r fmt(quantile(boot_phi[, "g2"], .975, na.rm = TRUE))`).
+
+
+## 12.4 Previsão: Random Forest contra o modelo base
+
+```{r rf-vs-base}
+base_r <- res[grepl("base", res$modelo), c("semente", "fold", "F1", "Acurácia", "AUC", "Recall", "Precisão", "VP", "FP", "FN", "VN")]
+rf_r <- rf$res[, c("semente", "fold", "F1", "Acurácia", "AUC", "Recall", "Precisão", "VP", "FP", "FN", "VN")]
+pares <- merge(base_r, rf_r, by = c("semente", "fold"), suffixes = c(".base", ".rf"))
+resumo_q <- function(v) sprintf("%s [%s; %s]", fmt(median(v)), fmt(quantile(v, .25)), fmt(quantile(v, .75)))
+data.frame(Modelo = c("Modelo base (esfericidade)", sprintf("Random Forest (%d descritores)", p18)),
+           F1 = c(resumo_q(pares$F1.base), resumo_q(pares$F1.rf)),
+           Acurácia = c(resumo_q(pares$Acurácia.base), resumo_q(pares$Acurácia.rf)),
+           AUC = c(resumo_q(pares$AUC.base), resumo_q(pares$AUC.rf)),
+           Recall = c(resumo_q(pares$Recall.base), resumo_q(pares$Recall.rf)),
+           Precisão = c(resumo_q(pares$Precisão.base), resumo_q(pares$Precisão.rf))) %>%
+  kable(format = "html", align = c("l", rep("c", 5)),
+        caption = "Tabela 41. Mediana [1.º; 3.º quartil] das métricas nos mesmos 50 folds de validação") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+J <- nrow(pares); razao <- 1 / (N_FOLDS - 1)
+do.call(rbind, lapply(c("F1", "Acurácia", "AUC"), function(mt) {
+  d <- pares[[paste0(mt, ".rf")]] - pares[[paste0(mt, ".base")]]
+  data.frame(Métrica = mt, `Diferença mediana (RF menos base)` = fmt(median(d)),
+             `Folds em que o RF supera` = sprintf("%d de %d", sum(d > 0), J),
+             `p (Nadeau e Bengio)` = fmt(nb_test(d, J, razao)), check.names = FALSE)
+})) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c", "c"),
+        caption = "Tabela 42. Comparação pareada entre o Random Forest e o modelo base") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+mc_rf <- colSums(pares[, c("VN.rf", "FP.rf", "FN.rf", "VP.rf")]) / N_SEEDS
+data.frame(`Diagnóstico real` = c("Colorretal", "Pulmão"),
+           `Classificado como colorretal` = fmt(c(mc_rf["VN.rf"], mc_rf["FN.rf"]), 1),
+           `Classificado como pulmão` = fmt(c(mc_rf["FP.rf"], mc_rf["VP.rf"]), 1), check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "c", "c"),
+        caption = "Tabela 43. Matriz de confusão média por repetição do Random Forest (previsões de validação)") %>%
+  kable_styling(bootstrap_options = c("condensed", "bordered"), full_width = FALSE)
+```
+
+```{r rf-texto, echo=FALSE}
+d_f1_rf <- pares$F1.rf - pares$F1.base
+```
+
+> No F1, o Random Forest com os `r p18` descritores teve mediana de
+> `r fmt(median(pares$F1.rf))`, contra `r fmt(median(pares$F1.base))` do
+> modelo base, superando-o em `r sum(d_f1_rf > 0)` dos `r J` folds
+> (p = `r fmt(nb_test(d_f1_rf, J, razao))` pelo teste de Nadeau e Bengio).
+
+```{r roc-rf, fig.width=6.5, fig.height=6.5, fig.cap="Figura 11. Curvas ROC da validação cruzada (uma por repetição) do modelo base e do Random Forest, nas mesmas partições. Os pontos indicam a sensibilidade e a especificidade médias com o limiar escolhido pelo F1."}
+pred_rf <- rf$pred %>% mutate(modelo = sprintf("Random Forest (%d descritores)", p18))
+pp12 <- rbind(preds %>% filter(grepl("base", modelo)) %>% select(semente, fold, paciente, prob, y, modelo) %>%
+                mutate(modelo = as.character(modelo)),
+              pred_rf[, c("semente", "fold", "paciente", "prob", "y", "modelo")])
+pts12 <- rbind(res %>% filter(grepl("base", modelo)) %>% summarise(fpr = 1 - mean(Especificidade), tpr = mean(Recall)) %>%
+                 mutate(modelo = "Modelo base (esfericidade)"),
+               rf$res %>% summarise(fpr = 1 - mean(Especificidade), tpr = mean(Recall)) %>%
+                 mutate(modelo = sprintf("Random Forest (%d descritores)", p18)))
+grafico_roc(curvas_roc(pp12), pts12,
+            setNames(c("#2A7F84", "#6C5BA8"), c("Modelo base (esfericidade)", sprintf("Random Forest (%d descritores)", p18))))
+```
+
+\
+
+# 13. Avaliação no conjunto de teste
+
+Os `r nrow(dados_teste)` pacientes separados no início
+(Seção 3.1) não foram usados em nenhuma etapa anterior. Nesta seção, eles são
+usados **uma única vez**, para estimar o desempenho dos modelos finais em
+pacientes novos. Os modelos finais são ajustados com todos os pacientes de
+treino, com as escolhas feitas por validação cruzada no treino:
+
+| Modelo | Ajuste final, só com o treino |
+|---|---|
+| Modelo base | regressão logística com a esfericidade; limiar escolhido pelo F1 na validação cruzada (Seção 8) |
+| Modelo completo | elastic net com os 105 descritores; $\alpha$, $\lambda$ e limiar escolhidos por validação cruzada repetida no treino |
+| Random Forest | os descritores estáveis ao contraste; `mtry` e limiar escolhidos pelas previsões *out-of-bag* do treino |
+
+Como o conjunto de teste é pequeno, as medidas são acompanhadas de intervalos
+de 95 % por bootstrap estratificado pelo diagnóstico (Efron e Tibshirani,
+1993): os pacientes de teste são reamostrados com reposição, dentro de cada
+diagnóstico, e as medidas são recalculadas a cada reamostragem.
+
+```{r teste-dados}
+teste  <- dados_teste
+y_te   <- as.integer(grepl("pulm", iconv(teste$diagnostico, to = "ASCII//TRANSLIT"), ignore.case = TRUE))
+X_te   <- as.matrix(teste[, feat]); storage.mode(X_te) <- "double"
+esf_te <- X_te[, "original_shape_Sphericity"]
+cat("Pacientes de teste:", nrow(X_te), "| pulmão:", sum(y_te), "| colorretal:", sum(y_te == 0), "\n")
+```
+
+```{r teste-modelos}
+# Modelo base: o mesmo da Seção 8, ajustado com o treino
+prob_base_te <- plogis(coef(fit_base)[1] + coef(fit_base)[2] * esf_te)
+
+# Modelo completo: alfa, lambda e limiar por validação cruzada repetida no treino
+pp_f <- prep_log(X, X_te)
+foldids_f <- lapply(seq_len(N_REP_I), function(r) {
+  set.seed(SEMENTE + r); fl <- createFolds(factor(y), k = N_FOLDS_I, list = TRUE)
+  f <- integer(n); for (k in seq_along(fl)) f[fl[[k]]] <- k; f })
+por_alfa_f <- lapply(GRADE_ALFA, function(a) {
+  lam <- glmnet(pp_f$tr, y, family = "binomial", alpha = a, nlambda = 50)$lambda
+  cvs <- lapply(foldids_f, function(fid) cv.glmnet(pp_f$tr, y, family = "binomial", alpha = a, lambda = lam,
+                                                   foldid = fid, type.measure = "deviance", keep = TRUE))
+  L <- min(sapply(cvs, function(cv) length(cv$cvm)))
+  dev <- colMeans(do.call(rbind, lapply(cvs, function(cv) cv$cvm[1:L])))
+  k <- which.min(dev)
+  list(lam = lam[1:L], k = k, dev = dev[k], oof = lapply(cvs, function(cv) plogis(cv$fit.preval[, k])))
+})
+melhor_f <- which.min(sapply(por_alfa_f, `[[`, "dev")); pa_f <- por_alfa_f[[melhor_f]]
+alfa_f <- GRADE_ALFA[melhor_f]; lambda_f <- pa_f$lam[pa_f$k]
+t_enet <- limiar_f1_rep(y, pa_f$oof)
+fit_enet_f <- glmnet(pp_f$tr, y, family = "binomial", alpha = alfa_f, lambda = pa_f$lam)
+prob_enet_te <- as.numeric(predict(fit_enet_f, newx = pp_f$te, s = lambda_f, type = "response"))
+sel_f <- as.matrix(coef(fit_enet_f, s = lambda_f))[-1, 1]; sel_f <- sel_f[sel_f != 0]
+
+# Random Forest: mtry e limiar pelas previsões out-of-bag do treino
+grade_mt <- unique(pmax(1, round(c(sqrt(p18), p18 / 4, p18 / 2))))
+set.seed(SEMENTE)
+fits_rf_f <- lapply(grade_mt, function(mt) randomForest(X18, factor(y), ntree = NTREE, mtry = mt))
+auc_oob_f <- sapply(fits_rf_f, function(m) auc_de(y, m$votes[, "1"]))
+rf_f <- fits_rf_f[[which.max(auc_oob_f)]]; mtry_f <- grade_mt[which.max(auc_oob_f)]
+t_rf <- limiar_f1(y, rf_f$votes[, "1"])
+prob_rf_te <- predict(rf_f, X_te[, feat18, drop = FALSE], type = "prob")[, "1"]
+
+data.frame(Modelo = c("Modelo base (esfericidade)", "Modelo completo (elastic net)", sprintf("Random Forest (%d descritores)", p18)),
+           `Escolhas feitas no treino` = c(sprintf("limiar = %s", fmt(t_final, 2)),
+                                           sprintf("alfa = %s; lambda = %s; %d descritores mantidos; limiar = %s",
+                                                   fmt(alfa_f, 1), formatC(lambda_f, format = "g", digits = 3, decimal.mark = ","), length(sel_f), fmt(t_enet, 2)),
+                                           sprintf("mtry = %d; limiar = %s", mtry_f, fmt(t_rf, 2))),
+           check.names = FALSE) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l"),
+        caption = "Tabela 44. Modelos finais: escolhas feitas por validação cruzada no conjunto de treino") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r teste-metricas}
+modelos_te <- list(`Modelo base (esfericidade)` = list(p = prob_base_te, t = t_final),
+                   `Modelo completo (elastic net)` = list(p = prob_enet_te, t = t_enet),
+                   `Random Forest` = list(p = prob_rf_te, t = t_rf))
+med_te <- function(idx, m) { mm <- metricas(y_te[idx], m$p[idx], m$t)
+  c(mm[c("F1", "Acurácia", "Recall", "Especificidade", "Precisão")], AUC = auc_de(y_te[idx], m$p[idx])) }
+B_TESTE <- 2000
+set.seed(SEMENTE)
+boot_idx <- replicate(B_TESTE, c(sample(which(y_te == 1), replace = TRUE), sample(which(y_te == 0), replace = TRUE)),
+                      simplify = FALSE)
+todos <- seq_along(y_te)
+obs_te  <- lapply(modelos_te, function(m) med_te(todos, m))
+boot_te <- lapply(modelos_te, function(m) t(sapply(boot_idx, function(i) med_te(i, m))))
+com_ic <- function(o, b) sprintf("%s [%s; %s]", fmt(o), fmt(quantile(b, .025, na.rm = TRUE)), fmt(quantile(b, .975, na.rm = TRUE)))
+
+do.call(rbind, lapply(names(modelos_te), function(nm) data.frame(
+  Modelo = nm,
+  F1 = com_ic(obs_te[[nm]]["F1"], boot_te[[nm]][, "F1"]),
+  Acurácia = com_ic(obs_te[[nm]]["Acurácia"], boot_te[[nm]][, "Acurácia"]),
+  AUC = com_ic(obs_te[[nm]]["AUC"], boot_te[[nm]][, "AUC"]),
+  Recall = pct(obs_te[[nm]]["Recall"]), Especificidade = pct(obs_te[[nm]]["Especificidade"]),
+  Precisão = pct(obs_te[[nm]]["Precisão"]), check.names = FALSE))) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", rep("c", 6)),
+        caption = sprintf("Tabela 45. Desempenho no conjunto de teste (%d pacientes), com intervalos de 95 %% por bootstrap", length(y_te))) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  column_spec(2, bold = TRUE)
+
+do.call(rbind, lapply(names(modelos_te), function(nm) {
+  pr <- as.integer(modelos_te[[nm]]$p >= modelos_te[[nm]]$t)
+  data.frame(Modelo = c(nm, ""), `Diagnóstico real` = c("Colorretal", "Pulmão"),
+             `Classificado como colorretal` = c(sum(y_te == 0 & pr == 0), sum(y_te == 1 & pr == 0)),
+             `Classificado como pulmão` = c(sum(y_te == 0 & pr == 1), sum(y_te == 1 & pr == 1)), check.names = FALSE)
+})) %>%
+  kable(format = "html", row.names = FALSE, align = c("l", "l", "c", "c"),
+        caption = "Tabela 46. Matrizes de confusão no conjunto de teste") %>%
+  kable_styling(bootstrap_options = c("condensed", "bordered"), full_width = FALSE)
+
+dif_te <- do.call(rbind, lapply(names(modelos_te)[-1], function(nm) {
+  d_obs <- obs_te[[nm]]["F1"] - obs_te[[1]]["F1"]
+  d_b   <- boot_te[[nm]][, "F1"] - boot_te[[1]][, "F1"]
+  data.frame(Comparação = paste(nm, "menos modelo base"),
+             `Diferença no F1 [IC 95 %]` = sprintf("%s [%s; %s]", fmt(d_obs), fmt(quantile(d_b, .025, na.rm = TRUE)), fmt(quantile(d_b, .975, na.rm = TRUE))),
+             check.names = FALSE)
+}))
+kable(dif_te, format = "html", row.names = FALSE, align = c("l", "c"),
+      caption = "Tabela 47. Diferença no F1 em relação ao modelo base, no conjunto de teste (bootstrap pareado)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+```{r teste-texto, echo=FALSE, results='asis'}
+cat(sprintf(paste0("\n> No conjunto de teste, o modelo base teve F1 de %s, o modelo completo, de %s, e o Random Forest, de %s. ",
+                   "Com apenas %d pacientes, os intervalos de 95 %% são largos, e a diferença entre os modelos deve ser lida junto ",
+                   "com esses intervalos: se o intervalo da diferença inclui o zero, os dados do teste não permitem afirmar que um ",
+                   "modelo seja melhor que o outro.\n"),
+            fmt(obs_te[[1]]["F1"]), fmt(obs_te[[2]]["F1"]), fmt(obs_te[[3]]["F1"]), length(y_te)))
+```
+
+\
+
+# Referências
+
+- Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate:
+  a practical and powerful approach to multiple testing. *Journal of the Royal
+  Statistical Society: Series B*, 57(1), 289-300.
+- Breiman, L. (2001). Random forests. *Machine Learning*, 45(1), 5-32.
+- Brier, G. W. (1950). Verification of forecasts expressed in terms of
+  probability. *Monthly Weather Review*, 78(1), 1-3.
+- Cliff, N. (1993). Dominance statistics: ordinal analyses to answer ordinal
+  questions. *Psychological Bulletin*, 114(3), 494-509.
+- Efron, B., & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*.
+  Chapman & Hall.
+- Friedman, J., Hastie, T., & Tibshirani, R. (2010). Regularization paths for
+  generalized linear models via coordinate descent. *Journal of Statistical
+  Software*, 33(1), 1-22.
+- Gregorutti, B., Michel, B., & Saint-Pierre, P. (2015). Grouped variable
+  importance with random forests and application to multiple functional data
+  analysis. *Computational Statistics & Data Analysis*, 90, 15-35.
+- Hennig, C. (2007). Cluster-wise assessment of cluster stability.
+  *Computational Statistics & Data Analysis*, 52(1), 258-271.
+- Hubert, L., & Arabie, P. (1985). Comparing partitions. *Journal of
+  Classification*, 2, 193-218.
+- Karjula, T., Niskakangas, A., Mustonen, O., et al. (2023). Results of
+  intention-to-treat pulmonary metastasectomies in northern Finland revealing
+  significant number of new lung primary carcinomas: time to move on from wedge
+  resections? *Journal of Thoracic Disease*, 15, 3319-3329.
+- Krstajic, D., Buturovic, L. J., Leahy, D. E., & Thomas, S. (2014).
+  Cross-validation pitfalls when selecting and assessing regression and
+  classification models. *Journal of Cheminformatics*, 6, 10.
+- Lee, J. E., Jeong, W. G., & Kim, Y.-H. (2021). Differentiation of primary
+  lung cancer from solitary lung metastasis in patients with colorectal cancer:
+  a retrospective cohort study. *World Journal of Surgical Oncology*, 19, 28.
+- Limkin, E. J., Reuzé, S., Carré, A., Sun, R., Schernberg, A., Alexis, A.,
+  et al. (2019). The complexity of tumor shape, spiculatedness, correlates with
+  tumor radiomic shape features. *Scientific Reports*, 9, 4329.
+- Lorensen, W. E., & Cline, H. E. (1987). Marching cubes: a high resolution 3D
+  surface construction algorithm. *ACM SIGGRAPH Computer Graphics*, 21(4),
+  163-169.
+- Losekann, C. (2026). *Diferenciação entre adenocarcinoma primário de pulmão
+  e metástase de neoplasia colorretal através da radiômica* (Dissertação de
+  mestrado). Programa de Pós-Graduação em Ciências Pneumológicas, Universidade
+  Federal do Rio Grande do Sul.
+- Nadeau, C., & Bengio, Y. (2003). Inference for the generalization error.
+  *Machine Learning*, 52(3), 239-281.
+- Nogueira, S., Sechidis, K., & Brown, G. (2018). On the stability of feature
+  selection algorithms. *Journal of Machine Learning Research*, 18(174), 1-54.
+- Romano, J., Kromrey, J. D., Coraggio, J., & Skowronek, J. (2006). Appropriate
+  statistics for ordinal level data. *Annual Meeting of the Florida Association
+  of Institutional Research*.
+- Tukey, J. W. (1977). *Exploratory Data Analysis*. Addison-Wesley.
+- Van Calster, B., McLernon, D. J., van Smeden, M., Wynants, L., &
+  Steyerberg, E. W. (2019). Calibration: the Achilles heel of predictive
+  analytics. *BMC Medicine*, 17, 230.
+- van der Walt, S., Schönberger, J. L., Nunez-Iglesias, J., Boulogne, F.,
+  Warner, J. D., Yager, N., et al. (2014). scikit-image: image processing in
+  Python. *PeerJ*, 2, e453.
+- Zou, H., & Hastie, T. (2005). Regularization and variable selection via the
+  elastic net. *Journal of the Royal Statistical Society: Series B*, 67(2),
+  301-320.
+
+\
+
+# Informações da sessão
+
+```{r sessao}
+sessionInfo()
+```
