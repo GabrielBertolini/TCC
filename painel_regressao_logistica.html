@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Painel interativo: regressão logística com esfericidade</title>
+<style>body{margin:0;background:#F4F6F7;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#1F2A30}
+.pg{max-width:780px;margin:0 auto;padding:22px 16px 40px}h1{font-size:1.35rem;margin:0 0 4px}.sub{color:#5E6B73;margin:0 0 14px;font-size:14px}</style>
+</head><body><div class="pg">
+<h1>Painel interativo: regressão logística com esfericidade</h1>
+<p class="sub">Método de Agrupamento para Análise de Estabilidade e Reprodutibilidade em Radiômica · modelo base ajustado com os pacientes de treino</p>
+<script>window.RL_DADOS = {esf:[0.74007,0.74457,0.5799,0.59879,0.65984,0.72978,0.4357,0.67616,0.47637,0.768,0.71305,0.45255,0.71401,0.62869,0.73559,0.59775,0.49738,0.52022,0.79022,0.5233,0.55074,0.70981,0.48955,0.74071,0.48797,0.43441,0.81106,0.53644,0.60428,0.66137,0.70914,0.86666,0.69282,0.58911,0.77977,0.77791,0.67859,0.77181,0.5454,0.59161,0.82238,0.59589,0.73184,0.81645,0.59275,0.68654,0.67481,0.81611,0.79075,0.6925,0.58962,0.5114,0.67258,0.64208,0.62992,0.83665,0.79121,0.66856,0.67111,0.64918,0.52976,0.62307,0.58111,0.43625,0.53829,0.65881,0.69155,0.6387,0.77768,0.86375,0.83679,0.71008,0.65664,0.82397,0.47432,0.65608,0.8327],y:[1,1,1,1,0,0,1,1,1,0,1,1,0,1,0,1,1,1,0,1,0,1,1,1,1,1,0,1,1,0,0,0,0,1,0,0,0,0,0,1,0,1,1,0,1,1,1,0,0,1,1,1,1,0,1,0,0,1,0,1,1,0,1,1,0,0,1,1,0,0,0,1,1,0,1,0,0],b0:10.61862,b1:-15.457071,limiar:0.24};</script>
+
+<style>
+.rl{border:1px solid #DADFE2;border-radius:10px;padding:14px 16px;margin:14px 0 22px;background:#FBFCFC;font-size:14px;line-height:1.5;color:#1F2A30}
+.rl-t{font-weight:600;font-size:15px;margin:0 0 8px}
+.rl-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:6px 0}
+.rl-lab{font-size:12.5px;color:#5E6B73}
+.rl input[type=range]{width:260px;vertical-align:middle}
+.rl-met{background:#EEF2F3;border-radius:8px;padding:7px 12px;min-width:100px}
+.rl-met .l{font-size:12px;color:#5E6B73}
+.rl-met .v{font-size:19px;font-weight:600}
+.rl-met.d{background:#E3EFEB;border:1.5px solid #2F6B5E}
+.rl-btn{border:1px solid #9AA5AB;background:#fff;border-radius:6px;padding:4px 11px;font-size:13px;cursor:pointer;color:#1F2A30}
+.rl-badge{display:inline-block;border-radius:14px;padding:3px 12px;font-weight:600;font-size:14px}
+.rl-p{background:#FAECE7;color:#8A3B22;border:1px solid #E07A5F}
+.rl-c{background:#E1F5EE;color:#0F5B49;border:1px solid #2A7F84}
+.rl table{border-collapse:collapse;font-size:13.5px}
+.rl td,.rl th{border:1px solid #DADFE2;padding:5px 12px;text-align:center}
+.rl th{background:#EEF2F3}
+.rl-conta{font-family:Consolas,Menlo,monospace;font-size:13px;background:#F4F6F7;border-radius:6px;padding:8px 10px;margin:6px 0;line-height:1.7}
+.rl-note{font-size:12.5px;color:#5E6B73;margin-top:8px}
+</style>
+
+<div class="rl" id="rl">
+  <div class="rl-t">1. Um paciente novo</div>
+  <div class="rl-row"><span class="rl-lab">Esfericidade da lesão</span>
+    <input type="range" id="rlE" min="0.35" max="0.95" step="0.005" value="0.61"><b id="rlEv"></b></div>
+  <div class="rl-conta" id="rlConta"></div>
+  <div class="rl-row">
+    <div class="rl-met d"><div class="l">Probabilidade de pulmão</div><div class="v" id="rlP"></div></div>
+    <div><div class="rl-lab">Classificação</div><span class="rl-badge" id="rlClasse"></span></div>
+  </div>
+
+  <div class="rl-t" style="margin-top:16px">2. O limiar e o desempenho</div>
+  <div class="rl-row"><span class="rl-lab">Limiar de probabilidade</span>
+    <input type="range" id="rlT" min="0" max="1" step="0.01"><b id="rlTv"></b>
+    <button class="rl-btn" id="rlF1">Voltar ao limiar do F1</button></div>
+  <div class="rl-lab" id="rlCorte"></div>
+  <div id="rlSvg"></div>
+  <div class="rl-row" style="align-items:flex-start;gap:20px">
+    <table id="rlTab"></table>
+    <div class="rl-row" style="margin:0">
+      <div class="rl-met"><div class="l">Recall</div><div class="v" id="rlRec"></div></div>
+      <div class="rl-met"><div class="l">Especificidade</div><div class="v" id="rlEsp"></div></div>
+      <div class="rl-met"><div class="l">Precisão (VPP)</div><div class="v" id="rlPrec"></div></div>
+      <div class="rl-met"><div class="l">VPN</div><div class="v" id="rlVpn"></div></div>
+      <div class="rl-met"><div class="l">Acurácia</div><div class="v" id="rlAcc"></div></div>
+      <div class="rl-met d"><div class="l">F1</div><div class="v" id="rlF1v"></div></div>
+    </div>
+  </div>
+  <div class="rl-note">Pontos com contorno escuro são pacientes classificados errado no limiar atual.</div>
+</div>
+
+<script>
+(function () {
+  var D = window.RL_DADOS, n = D.esf.length;
+  function $(id) { return document.getElementById(id); }
+  function f(x, d) { if (!isFinite(x)) return "-"; return x.toFixed(d).replace(".", ","); }
+  function pc(x) { return isFinite(x) ? Math.round(100 * x) + "%" : "-"; }
+  function prob(e) { return 1 / (1 + Math.exp(-(D.b0 + D.b1 * e))); }
+  var pr = D.esf.map(prob);
+  var w = 640, h = 250, m = {l: 44, r: 14, t: 10, b: 32}, x0 = 0.35, x1 = 0.95;
+  function sx(v) { return m.l + (v - x0) / (x1 - x0) * (w - m.l - m.r); }
+  function sy(v) { return h - m.b - v * (h - m.t - m.b); }
+  var s = 7, jit = D.esf.map(function () { s = (s * 1664525 + 1013904223) % 4294967296; return (s / 4294967296 - 0.5) * 0.06; });
+  var curva = "";
+  for (var k = 0; k <= 120; k++) { var e = x0 + (x1 - x0) * k / 120; curva += (k ? "L" : "M") + sx(e).toFixed(1) + "," + sy(prob(e)).toFixed(1); }
+  var eixos = "";
+  [0.4, 0.5, 0.6, 0.7, 0.8, 0.9].forEach(function (v) { eixos += '<text x="' + sx(v) + '" y="' + (h - 14) + '" font-size="11" text-anchor="middle" fill="#5E6B73">' + f(v, 1) + '</text>'; });
+  [0, 0.5, 1].forEach(function (v) { eixos += '<line x1="' + m.l + '" x2="' + (w - m.r) + '" y1="' + sy(v) + '" y2="' + sy(v) + '" stroke="#E4E8EA"></line><text x="' + (m.l - 6) + '" y="' + (sy(v) + 4) + '" font-size="11" text-anchor="end" fill="#5E6B73">' + f(v, 1) + '</text>'; });
+
+  function desenha() {
+    var e = parseFloat($("rlE").value), t = parseFloat($("rlT").value);
+    var esc = D.b0 + D.b1 * e, p = prob(e), cl = p >= t ? 1 : 0;
+    $("rlEv").textContent = f(e, 3); $("rlTv").textContent = f(t, 2);
+    $("rlConta").innerHTML = "escore = " + f(D.b0, 3) + " + (" + f(D.b1, 3) + ") × " + f(e, 3) + " = <b>" + f(esc, 3) + "</b><br>" +
+      "probabilidade = 1 / (1 + e<sup>" + f(-esc, 3) + "</sup>) = <b>" + f(p, 3) + "</b><br>" +
+      "comparação: " + f(p, 3) + (cl ? " ≥ " : " &lt; ") + f(t, 2) + " (limiar) → classe <b>" + cl + "</b>";
+    $("rlP").textContent = pc(p);
+    $("rlClasse").textContent = cl ? "1 · Pulmão" : "0 · Colorretal";
+    $("rlClasse").className = "rl-badge " + (cl ? "rl-p" : "rl-c");
+    var corte = (Math.log(t / (1 - t)) - D.b0) / D.b1;
+    $("rlCorte").textContent = (t > 0 && t < 1) ? "Equivale a classificar como pulmão as lesões com esfericidade abaixo de " + f(corte, 3) + "." :
+      (t <= 0 ? "Com limiar 0, todas as lesões são classificadas como pulmão." : "Com limiar 1, nenhuma lesão é classificada como pulmão.");
+    var vp = 0, fp = 0, fn = 0, vn = 0, pts = "";
+    for (var i = 0; i < n; i++) {
+      var c = pr[i] >= t ? 1 : 0, erro = c !== D.y[i];
+      if (D.y[i] === 1) { if (c) vp++; else fn++; } else { if (c) fp++; else vn++; }
+      var yy = (D.y[i] === 1 ? 0.97 : 0.03) + jit[i];
+      pts += '<circle cx="' + sx(D.esf[i]) + '" cy="' + sy(yy) + '" r="3.6" fill="' + (D.y[i] === 1 ? "#E07A5F" : "#2A7F84") + '" fill-opacity="0.8"' + (erro ? ' stroke="#1F2A30" stroke-width="1.5"' : '') + '></circle>';
+    }
+    var lin = (t > 0 && t < 1 && corte > x0 && corte < x1) ? '<line x1="' + sx(corte) + '" x2="' + sx(corte) + '" y1="' + sy(0) + '" y2="' + sy(1) + '" stroke="#2F6B5E" stroke-dasharray="5 3"></line>' : '';
+    $("rlSvg").innerHTML = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="max-width:' + w + 'px">' + eixos +
+      '<text x="' + ((w + m.l) / 2) + '" y="' + (h - 1) + '" font-size="11.5" text-anchor="middle" fill="#5E6B73">esfericidade (em cima: pulmão; embaixo: colorretal)</text>' +
+      '<line x1="' + m.l + '" x2="' + (w - m.r) + '" y1="' + sy(t) + '" y2="' + sy(t) + '" stroke="#C8603F" stroke-dasharray="5 3"></line>' + lin + pts +
+      '<path d="' + curva + '" fill="none" stroke="#1F2A30" stroke-width="2"></path>' +
+      '<circle cx="' + sx(e) + '" cy="' + sy(p) + '" r="6.5" fill="#F2C14E" stroke="#1F2A30" stroke-width="1.2"></circle></svg>';
+    $("rlTab").innerHTML = '<tr><th>Real / Previsto</th><th>Colorretal (0)</th><th>Pulmão (1)</th></tr>' +
+      '<tr><th>Colorretal</th><td style="background:#E1F5EE">' + vn + '</td><td>' + fp + '</td></tr>' +
+      '<tr><th>Pulmão</th><td>' + fn + '</td><td style="background:#FAECE7">' + vp + '</td></tr>';
+    var rec = vp / (vp + fn), prec = vp + fp ? vp / (vp + fp) : NaN;
+    $("rlRec").textContent = pc(rec); $("rlEsp").textContent = pc(vn / (vn + fp));
+    $("rlPrec").textContent = pc(prec); $("rlVpn").textContent = pc(vn + fn ? vn / (vn + fn) : NaN);
+    $("rlAcc").textContent = pc((vp + vn) / n);
+    $("rlF1v").textContent = isFinite(prec) && prec + rec > 0 ? f(2 * prec * rec / (prec + rec), 3) : "0,000";
+  }
+  $("rlT").value = D.limiar;
+  $("rlE").addEventListener("input", desenha);
+  $("rlT").addEventListener("input", desenha);
+  $("rlF1").addEventListener("click", function () { $("rlT").value = D.limiar; desenha(); });
+  desenha();
+})();
+</script>
+
+</div></body></html>
